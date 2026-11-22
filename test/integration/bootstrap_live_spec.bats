@@ -24,7 +24,7 @@
 
 bats_require_minimum_version 1.5.0
 
-BASE_REMOTE="https://github.com/ycpss91255-docker/base.git"
+BASE_REMOTE="https://github.com/ycpss91255-lab/base.git"
 
 setup() {
   if [[ "${BOOTSTRAP_LIVE_BASE:-}" != "1" ]]; then

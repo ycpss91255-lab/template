@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly SCRIPT_NAME="bootstrap.sh"
 readonly TEMPLATE_REL=".base"
-readonly DEFAULT_REMOTE="${TEMPLATE_REMOTE:-https://github.com/ycpss91255-docker/base.git}"
+readonly DEFAULT_REMOTE="${TEMPLATE_REMOTE:-https://github.com/ycpss91255-lab/base.git}"
 
 # init.sh locations inside the subtree, newest layout first. bootstrap.sh
 # is pinned to nothing -- it is whatever sits on the template repo's main

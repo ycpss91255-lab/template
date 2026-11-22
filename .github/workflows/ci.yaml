@@ -18,7 +18,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ycpss91255-docker/test-tools:latest
+      image: ghcr.io/ycpss91255-lab/test-tools:latest
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +36,7 @@ jobs:
     name: bootstrap against the live base
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ycpss91255-docker/test-tools:latest
+      image: ghcr.io/ycpss91255-lab/test-tools:latest
     steps:
       - uses: actions/checkout@v4
 

@@ -5,7 +5,7 @@
 # TEST_TOOLS_IMAGE build arg. Default `test-tools:local` works for the
 # local `./build.sh` flow (builds Dockerfile.test-tools into the host
 # Docker daemon). CI overrides this to
-# `ghcr.io/ycpss91255-docker/test-tools:vX.Y.Z` so buildx can pull the
+# `ghcr.io/ycpss91255-lab/test-tools:vX.Y.Z` so buildx can pull the
 # arch-correct pre-built image without the cross-step image-store
 # isolation that broke the old test-tools:local CI pattern.
 #
@@ -248,7 +248,7 @@ RUN bats /smoke_test/
 ############################## builder + runtime split (optional) ##############################
 # Three concrete stages for repos that need a separate runtime image
 # (compiled binaries / generated artifacts to ship without dev deps).
-# Lessons lifted from ycpss91255-docker/ros1_bridge#60 PR -- empirically
+# Lessons lifted from ycpss91255-lab/ros1_bridge#60 PR -- empirically
 # saved ~1.1 GB/arch on that repo's runtime image.
 #
 # Three rules, all of which the previous commented-out hint was silent on:
