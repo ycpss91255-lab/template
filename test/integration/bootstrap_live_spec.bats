@@ -116,7 +116,12 @@ _dangling_symlinks() {
 
   assert [ -n "${_newest}" ]
   assert_equal "${_installed}" "${_newest}"
-  refute_output --partial "-rc"
+  # The installed version itself must carry no pre-release suffix. This used
+  # to be `refute_output --partial "-rc"`, which inspects bootstrap's own log
+  # and so tripped on the log line naming the template's SNAPSHOT version
+  # ("snapshot v0.43.0-rc6 -> target v0.42.0") even though the installed
+  # version was a stable tag.
+  refute [ "${_installed}" != "${_installed%%-*}" ]
 }
 
 # why: The subtree must arrive as subtree history, not a copied directory --
