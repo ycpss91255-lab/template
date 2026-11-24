@@ -51,6 +51,9 @@ _jobs() {
   run _jobs "${WF}/ci.yaml"
   assert_success
   assert_line "test"
+  # A `name:` on the job would rename the check that branch protection waits for.
+  run awk '/^  test:/ { on = 1; next } /^  [A-Za-z0-9_-]+:/ { on = 0 } on && /^    name:/' "${WF}/ci.yaml"
+  assert_output ""
   run grep -c 'test/integration/workflow_triggers_spec\.bats' "${WF}/ci.yaml"
   assert_output "1"
 }
