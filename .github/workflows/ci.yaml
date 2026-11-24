@@ -38,6 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # checkout registers safe.directory in a HOME of its own only; the spec
+      # reads this repo's tree as root inside the container and git refuses
+      # a directory another user owns (#30).
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
       - name: Bats live-base guard
         env:
           BOOTSTRAP_LIVE_BASE: "1"

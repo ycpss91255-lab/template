@@ -7,6 +7,8 @@
   only calls `ci.yaml`. GitHub disables a workflow with a `schedule:` after
   60 quiet days, and while the schedule was in `ci.yaml` that stopped the
   push and pull-request runs as well (#28).
+- The `bootstrap against the live base` CI job trusts its checkout, so it
+  no longer fails on git's dubious-ownership check before testing (#30).
 - `bootstrap.sh` removes the template's `Dockerfile` along with the other
   template-specific files. `init.sh` branches on `[[ -f Dockerfile ]]` as
   its proxy for "this repo has been set up before", so leaving it behind
