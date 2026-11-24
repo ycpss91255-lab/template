@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+- The weekly CI schedule moves from `ci.yaml` to `ci-weekly.yaml`, which
+  only calls `ci.yaml`. GitHub disables a workflow with a `schedule:` after
+  60 quiet days, and while the schedule was in `ci.yaml` that stopped the
+  push and pull-request runs as well (#28).
 - `bootstrap.sh` removes the template's `Dockerfile` along with the other
   template-specific files. `init.sh` branches on `[[ -f Dockerfile ]]` as
   its proxy for "this repo has been set up before", so leaving it behind
