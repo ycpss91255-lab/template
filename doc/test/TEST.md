@@ -1,6 +1,6 @@
 # TEST.md
 
-**24 tests** total.
+**25 tests** total.
 
 ## test/smoke/template-v0.41_env.bats (2)
 
@@ -40,7 +40,7 @@ can assert what the resulting repo CONTAINS. No network access required.
 | `a failure after step 2 has committed rolls the repo all the way back` | Rollback: commit undone, created paths swept, user's files kept, re-runnable |
 | `after bootstrap at v0.9.5, subtree pull to v0.9.7 succeeds` | Subtree history is intact for upgrades |
 
-## test/integration/workflow_triggers_spec.bats (5)
+## test/integration/workflow_triggers_spec.bats (6)
 
 Guards which workflow owns the schedule: GitHub disables a workflow with a
 `schedule:` after 60 quiet days, so the schedule lives in `ci-weekly.yaml`
@@ -50,6 +50,7 @@ and the PR checks in `ci.yaml` cannot be disabled with it (#28).
 |------|-------------|
 | `ci.yaml carries no schedule, so inactivity cannot disable the PR checks` | No `schedule:` under `on:` |
 | `ci.yaml still runs on push, pull_request, dispatch and call` | The four triggers are present |
+| `ci.yaml keeps the job id that branch protection requires, and runs this spec` | Job `test` exists; the step names this spec |
 | `ci-weekly.yaml owns the schedule and nothing a PR needs` | `schedule:` present, no `push` / `pull_request` |
 | `ci-weekly.yaml only calls ci.yaml, so the steps have one definition` | One job, one local `uses:`, no steps of its own |
 | `no workflow mixes a schedule with the triggers a PR or push needs` | Holds for every file in `.github/workflows/` |

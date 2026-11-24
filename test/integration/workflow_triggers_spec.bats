@@ -47,6 +47,14 @@ _jobs() {
   assert_line "workflow_call"
 }
 
+@test "ci.yaml keeps the job id that branch protection requires, and runs this spec" {
+  run _jobs "${WF}/ci.yaml"
+  assert_success
+  assert_line "test"
+  run grep -c 'test/integration/workflow_triggers_spec\.bats' "${WF}/ci.yaml"
+  assert_output "1"
+}
+
 @test "ci-weekly.yaml owns the schedule and nothing a PR needs" {
   run _triggers "${WF}/ci-weekly.yaml"
   assert_success
@@ -67,11 +75,13 @@ _jobs() {
 
 @test "no workflow mixes a schedule with the triggers a PR or push needs" {
   local f
-  for f in "${WF}"/*.yaml; do
+  for f in "${WF}"/*.yaml "${WF}"/*.yml; do
+    [[ -e "${f}" ]] || continue
     run _triggers "${f}"
     assert_success
     if [[ "${output}" == *schedule* ]]; then
       refute_line "pull_request"
+      refute_line "pull_request_target"
       refute_line "push"
     fi
   done
