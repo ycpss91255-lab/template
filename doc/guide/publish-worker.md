@@ -51,6 +51,11 @@ jobs:
         BASE_IMAGE=${{ matrix.target.base }}
 ```
 
+A run may call the worker once per variant, as above: each call keeps its
+intermediate digest artifacts apart by `registry`, `image_name` and
+`tag_suffix`. Two calls in one run must not share all three: they would
+publish the same tag, and their artifacts collide or mix.
+
 ### Tag contract
 
 `:latest` is a moving convenience tag and is never a prerelease: a prerelease ref (for example `v0.1.0-rc1`) never moves it. `:<version>` is the reproducible reference and is always published. Org-internal consumers must pin to `:<version>`, not `:latest`.

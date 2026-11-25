@@ -295,7 +295,7 @@ _with() {
     _gated_job "${_job}" || continue
     _n=$((_n + 1))
     _if="$(_yaml_eval "${SELF_WF}" ".jobs.\"${_job}\".if")"
-    [[ "${_if}" =~ ^needs\.classify\.outputs\.(select_[a-z_]+)\ ==\ \'true\'$ ]] \
+    [[ "${_if}" =~ ^needs\.classify\.outputs\.(select_[a-z0-9_]+)\ ==\ \'true\'$ ]] \
       || { _bad+="${_job}: if: is '${_if}'"$'\n'; continue; }
     _k="${BASH_REMATCH[1]}"
     run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\" | .classify.outputs.${_k} = \"false\"")"
@@ -303,7 +303,7 @@ _with() {
     run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\"")"
     [[ "${status}" -eq 1 ]] || _bad+="${_job}: ${_k}=true skip exited ${status}"$'\n'
   done < <(yq '.jobs."ci-rollup".needs[]' "${SELF_WF}")
-  [[ "${_n}" -ge 10 ]] || fail "expected the ten gated jobs, read ${_n}"
+  [[ "${_n}" -ge 12 ]] || fail "expected the twelve gated jobs, read ${_n}"
   [[ -z "${_bad}" ]] || fail "${_bad}"
 }
 
@@ -340,15 +340,36 @@ _with() {
   [[ -z "${_bad}" ]] || fail "${_bad}"
 }
 
-# why: cycle 8. compute-shards and mutation-roster carry no `if:` and no
-# select_* key; on main both sit in the hard-mandatory success-only loop
-# (`git show origin/main:.github/workflows/self-test.yaml`). A skip of
-# either fails, even with every key `false`.
-@test "self-test: the rollup fails a compute-shards or mutation-roster skip (base#1584)" {
+# why: cycle 8. compute-shards and the amd64 image builder carry no `if:`
+# and no select_* key. A skip of either fails, even with every key `false`.
+@test "self-test: the rollup fails a compute-shards or amd64 image builder skip (base#1584, base#2110)" {
   local _job _base
   _base="$(_needs_json false success)"
-  for _job in compute-shards mutation-roster; do
+  for _job in compute-shards test-tools-image-amd64; do
     run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\"")"
+    assert_failure 1
+  done
+}
+
+# why: base#2110. The rollup must tell a docs-only skip from one that
+# should have run: mutation-roster and the arm64 image builder pass
+# skipped only while their own key is `false`. The same skip beside a
+# `true`, empty or missing key fails, whatever the other keys say.
+@test "self-test: the rollup excuses a mutation-roster or arm64 image skip only when its own key is false (base#2110)" {
+  local _job _k _base
+  _base="$(_needs_json true success)"
+  for _job in mutation-roster test-tools-image-arm64; do
+    _k="select_${_job//-/_}"
+    run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\" | .classify.outputs.${_k} = \"false\"")"
+    assert_success
+    run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\"")"
+    assert_failure 1
+    assert_output --partial "${_job} skipped although classify did not deselect it"
+    run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\" | .classify.outputs.${_k} = \"\"")"
+    assert_failure 1
+    run _rollup_json "$(_with "${_base}" ".[\"${_job}\"].result = \"skipped\" | .classify.outputs |= del(.${_k})")"
+    assert_failure 1
+    run _rollup_json "$(_with "$(_needs_json false success)" ".[\"${_job}\"].result = \"skipped\" | .classify.outputs.${_k} = \"true\"")"
     assert_failure 1
   done
 }

@@ -1119,6 +1119,225 @@ EOF
   [[ "${stderr}" != *"escape sequence"* ]]
 }
 
+# ── every awk a consumer's host may run ─────────────────────────────────────
+# The upgrade runs on the consumer's host, where `awk` is whatever the
+# distribution installed: mawk on Debian and Ubuntu, gawk or busybox
+# elsewhere. POSIX leaves the order in which an assignment evaluates its two
+# sides open, and the three differ there.
+
+# _awk_engines -- the awk programs to run the migrations under. The
+#   test-tools image installs mawk and gawk beside busybox for this; a run
+#   with no mawk would compare nothing, so its absence fails.
+_awk_engines() {
+  command -v mawk >/dev/null 2>&1 || fail "no mawk: the test-tools image carries one"
+  echo mawk
+  if command -v gawk >/dev/null 2>&1; then echo gawk; fi
+  if command -v busybox >/dev/null 2>&1; then echo busybox; fi
+}
+
+# _use_awk <engine> -- puts an `awk` that is <engine> first on PATH.
+_use_awk() {
+  local _dir="${TEMP_DIR}/engine-$1" _cmd
+  _cmd="$(command -v "$1")"
+  [[ "$1" == busybox ]] && _cmd+=" awk"
+  mkdir -p "${_dir}"
+  printf '#!/bin/sh\nexec %s "$@"\n' "${_cmd}" > "${_dir}/awk"
+  chmod +x "${_dir}/awk"
+  PATH="${_dir}:${PATH}"
+}
+
+# why: base#2138 -- under mawk every shipped spec read as shipped at two
+# paths, so a hand-listed COPY was left naming the deleted tree, the upgrade
+# exited 0 and the consumer's next build failed. The input is the issue's.
+# The two refusals are the control: they must stay refusals.
+@test "migration (smoke-copy): a hand-listed COPY is rewritten the same under every awk (base#2138)" {
+  local _engine _engines _path="${PATH}"
+  _engines="$(_awk_engines)" || fail "${_engines}"
+  mkdir -p "${TEMP_DIR}/.base/dist/test/bats/smoke/shared" \
+    "${TEMP_DIR}/.base/dist/test/bats/smoke/devel-test"
+  : > "${TEMP_DIR}/.base/dist/test/bats/smoke/shared/test_helper.bash"
+  : > "${TEMP_DIR}/.base/dist/test/bats/smoke/devel-test/script_help.bats"
+  : > "${TEMP_DIR}/.base/dist/test/bats/smoke/shared/ambiguous.bats"
+  : > "${TEMP_DIR}/.base/dist/test/bats/smoke/devel-test/ambiguous.bats"
+  while IFS= read -r _engine; do
+    PATH="${_path}"
+    _use_awk "${_engine}"
+    cat > "${DF}" <<'DOCKERFILE'
+FROM devel AS devel-test
+COPY .base/test/smoke/test_helper.bash .base/test/smoke/script_help.bats /smoke_test/
+COPY .base/test/smoke/ambiguous.bats /smoke_test/
+COPY .base/test/smoke/retired.bats /smoke_test/
+DOCKERFILE
+    run bash -c "$(_src); _migrate_smoke_copy_apply '${DF}'"
+    assert_success
+    run cat "${DF}"
+    assert_output "FROM devel AS devel-test
+COPY .base/dist/test/bats/smoke/shared/test_helper.bash .base/dist/test/bats/smoke/devel-test/script_help.bats /smoke_test/
+COPY .base/test/smoke/ambiguous.bats /smoke_test/
+COPY .base/test/smoke/retired.bats /smoke_test/" || fail "under ${_engine}"
+  done <<< "${_engines}"
+}
+
+# _old_layout_repo -- a repo whose Dockerfile and entrypoint fire every
+#   migration that runs an awk program.
+_old_layout_repo() {
+  mkdir -p "${TEMP_DIR}/script" "${TEMP_DIR}/test/bats/smoke/shared" \
+    "${TEMP_DIR}/test/bats/smoke/devel-test" \
+    "${TEMP_DIR}/.base/dist/test/bats/smoke/shared" \
+    "${TEMP_DIR}/.base/dist/test/bats/smoke/devel-test"
+  : > "${TEMP_DIR}/.base/dist/test/bats/smoke/shared/test_helper.bash"
+  : > "${TEMP_DIR}/.base/dist/test/bats/smoke/devel-test/script_help.bats"
+  : > "${TEMP_DIR}/test/bats/smoke/devel-test/own.bats"
+  cat > "${DF}" <<'DOCKERFILE'
+FROM bats/bats:latest AS bats-src
+FROM alpine:latest AS lint-tools
+FROM ${BASE_IMAGE} AS sys
+ARG USER="initial"
+USER root
+RUN useradd -m -s /bin/bash -u "${UID}" "${USER}" && usermod -l a b
+# hadolint ignore=DL3002
+USER root
+COPY --chmod=0755 .base/script/docker/runtime/logging.sh /usr/local/lib/base/logging.sh
+COPY --chmod=0755 .base/script/docker/runtime/logrotate.sh /usr/local/lib/base/logrotate.sh
+FROM sys AS lint
+COPY .base/script/docker/build.sh \
+     .base/script/docker/run.sh \
+     /lint/
+COPY .base/script/docker/lib /lint/lib
+FROM sys AS devel-test
+COPY .base/test/smoke/ /smoke_test/
+COPY .base/test/smoke/test_helper.bash \
+     .base/test/smoke/script_help.bats /smoke_test/
+COPY test/smoke/ /smoke_test/
+COPY test/smoke/own.bats /smoke_test/
+DOCKERFILE
+  cat > "${TEMP_DIR}/script/entrypoint.sh" <<'ENTRY'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /opt/ros/humble/setup.bash
+exec "$@"
+ENTRY
+}
+
+# why: base#2138's inventory, kept as a test. Each awk program in the
+# migration list runs under every engine over one old-layout repo; the
+# files and the messages must be the same whichever awk the host has.
+@test "apply_migrations writes the same files and messages under every awk (base#2138)" {
+  local _engine _engines _path="${PATH}" _first="" _got _want=""
+  _engines="$(_awk_engines)" || fail "${_engines}"
+  while IFS= read -r _engine; do
+    PATH="${_path}"
+    _use_awk "${_engine}"
+    _old_layout_repo
+    run bash -c "$(_src); apply_migrations '${DF}' 2>&1"
+    assert_success
+    _got="$(sed -E 's/^[0-9TZ:.+-]+ //' <<< "${output}")
+$(cat "${DF}" "${TEMP_DIR}/script/entrypoint.sh")"
+    if [[ -z "${_first}" ]]; then
+      _first="${_engine}"
+      _want="${_got}"
+    else
+      [[ "${_got}" == "${_want}" ]] \
+        || fail "${_engine} differs from ${_first}:
+$(diff <(printf '%s\n' "${_want}") <(printf '%s\n' "${_got}"))"
+    fi
+  done <<< "${_engines}"
+  # Non-vacuity: the awk-driven migrations all fired and did their work.
+  local _m
+  for _m in explicit_copy hadolint nounset_source smoke_copy repo_smoke_copy runtime_dir_copy; do
+    [[ "${_want}" =~ matched\ \(([^\)]*) && " ${BASH_REMATCH[1]} " == *" ${_m} "* ]] \
+      || fail "${_m} did not fire: ${_want}"
+  done
+  # An awk-driven rewrite is reported, not only the sed-driven ones.
+  for _m in '(#567 m3)' '(#928)' '(#1044)' '(#971)' '(#567 m8'; do
+    grep -F ' patched: ' <<< "${_want}" | grep -qF -- "${_m}" || fail "no patched line ${_m}: ${_want}"
+  done
+  run cat "${DF}"
+  refute_output --partial ' .base/test/smoke'
+  assert_output --partial 'useradd -l -m'
+  assert_output --partial '# hadolint ignore=DL3006'
+  assert_output --partial 'DL3002,DL3066'
+  run cat "${TEMP_DIR}/script/entrypoint.sh"
+  assert_line 'set +u'
+}
+
+# why: base#2138 -- the line said a Dockerfile was patched when no byte had
+# changed, so the one report of a failed rewrite read as a success. The
+# warning that names the problem stays.
+@test "apply_migrations: a migration that changes nothing reports no patch (base#2138)" {
+  mkdir -p "${TEMP_DIR}/.base/dist/test/bats/smoke/shared"
+  cat > "${DF}" <<'DOCKERFILE'
+FROM devel AS devel-test
+COPY .base/test/smoke/retired.bats /smoke_test/
+DOCKERFILE
+  cp "${DF}" "${DF}.before"
+  run bash -c "$(_src); apply_migrations '${DF}' 2>&1"
+  assert_success
+  cmp "${DF}" "${DF}.before"
+  refute_output --partial 'Dockerfile patched'
+  assert_output --partial 'resolve it by hand'
+  assert_output --partial '0 file(s) rewritten'
+
+  cat > "${DF}" <<'DOCKERFILE'
+FROM devel AS devel
+COPY .base/dist/script/docker/runtime/logging.sh \
+     /usr/local/lib/base/logging.sh
+DOCKERFILE
+  cp "${DF}" "${DF}.before"
+  run bash -c "$(_src); _migrate_runtime_dir_copy_apply '${DF}' 2>&1"
+  assert_success
+  cmp "${DF}" "${DF}.before"
+  refute_output --partial 'Dockerfile patched'
+  assert_output --partial 'collapse it by hand'
+}
+
+# why: base#2138 -- the notice of one migration's rewrite is used up by it.
+# Left pending, it would stand for a later migration that changed nothing.
+@test "apply_migrations: an earlier migration's rewrite is not a later one's patch (base#2138)" {
+  mkdir -p "${TEMP_DIR}/.base/dist/test/bats/smoke/shared"
+  cat > "${DF}" <<'DOCKERFILE'
+FROM devel AS devel-test
+COPY .base/downstream/script/docker/lib /lint/lib
+COPY .base/test/smoke/retired.bats /smoke_test/
+DOCKERFILE
+  run bash -c "$(_src); apply_migrations '${DF}' 2>&1"
+  assert_success
+  assert_output --partial 'Dockerfile patched: .base/downstream/'
+  refute grep -F '(#928)' <<< "$(grep -F 'Dockerfile patched' <<< "${output}")"
+  assert_output --partial 'resolve it by hand (#928)'
+}
+
+# why: a run starts with no notice pending, whatever an earlier write in the
+# same shell left behind.
+@test "apply_migrations: a run does not inherit a pending patch notice (base#2138)" {
+  mkdir -p "${TEMP_DIR}/.base/dist/test/bats/smoke/shared"
+  printf '%s\n' 'FROM devel AS devel-test' 'COPY .base/test/smoke/retired.bats /smoke_test/' > "${DF}"
+  run bash -c "$(_src); _DFM_CHANGED=('${DF}'); apply_migrations '${DF}' 2>&1"
+  assert_success
+  refute_output --partial 'Dockerfile patched'
+}
+
+# why: the other direction of the case above: a rewrite is still reported,
+# once, and an entrypoint rewrite does not stand in for a Dockerfile one.
+@test "apply_migrations: a file that changed is reported as patched, and only that file (base#2138)" {
+  mkdir -p "${TEMP_DIR}/script"
+  printf '%s\n' 'FROM busybox AS sys' \
+    'COPY .base/script/docker/runtime/_entrypoint_logging.sh /usr/local/lib/base/_entrypoint_logging.sh' > "${DF}"
+  printf '%s\n' '#!/bin/bash' 'source /usr/local/lib/base/_entrypoint_logging.sh' > "${TEMP_DIR}/script/entrypoint.sh"
+  run bash -c "$(_src); _migrate_logging_rename_apply '${DF}' 2>&1"
+  assert_success
+  [ "$(grep -c 'Dockerfile patched' <<< "${output}")" -eq 1 ]
+  [ "$(grep -c 'entrypoint patched' <<< "${output}")" -eq 1 ]
+
+  printf '%s\n' 'FROM busybox AS sys' > "${DF}"
+  printf '%s\n' '#!/bin/bash' 'source /usr/local/lib/base/_entrypoint_logging.sh' > "${TEMP_DIR}/script/entrypoint.sh"
+  run bash -c "$(_src); _migrate_logging_rename_apply '${DF}' 2>&1"
+  assert_success
+  refute_output --partial 'Dockerfile patched'
+  assert_output --partial 'entrypoint patched'
+}
+
 # ── migration (repo-smoke-copy): repo-owned test/smoke/ -> per-stage ────────
 # The sibling of smoke-copy. That one heals the path into base's SHIPPED
 # tree; this one heals the path into the repo's OWN. Both moved in the same
@@ -1646,7 +1865,7 @@ EOF
 # Heal the mechanical violations the fanout fixed by hand:
 #   DL3007  FROM bats/bats:latest / alpine:latest -> pinned tags
 #   DL3046  useradd -u -> useradd -l -u
-#   DL3003  RUN cd /lint && hadolint -> WORKDIR /lint + RUN hadolint
+#   DL3003  RUN cd /lint && hadolint gains an inline ignore
 #   DL3042  pip install -r -> pip install --no-cache-dir -r
 #   DL4006  alpine lint-tools stage gains SHELL ash -o pipefail
 #   DL3006  parameterized FROM ${BASE_IMAGE} gains an inline ignore
@@ -1672,15 +1891,105 @@ EOF
   grep -Fq 'useradd -l -u "${UID}"' "${DF}"
 }
 
-@test "migration 5 (hadolint): DL3003 cd /lint -> WORKDIR /lint + RUN (#567)" {
+# why: base#2150 -- the rewrite to `WORKDIR /lint` moved every later
+# instruction of the stage, and the image's own working directory, into
+# /lint: `RUN cd` ends with its line and WORKDIR does not. The line has to
+# keep running what it ran, so it is kept and the rule is answered beside
+# it. hadolint also looks for .hadolint.yaml in its working directory, so
+# the `cd` cannot be dropped for a path either.
+@test "migration 5 (hadolint): DL3003 answers RUN cd /lint without moving the stage (base#2150)" {
   cat > "${DF}" <<'EOF'
+FROM busybox AS devel-test
+WORKDIR /root/demo
+COPY Dockerfile /lint/Dockerfile
 RUN cd /lint && hadolint Dockerfile
+RUN echo "hadolint ignore=DL3059"
+  RUN  cd  /lint  &&  hadolint Dockerfile && cd / && ls
+RUN pwd
+EOF
+  run bash -c "$(_src); _migrate_hadolint_detect '${DF}' && _migrate_hadolint_apply '${DF}'"
+  assert_success
+  run cat "${DF}"
+  assert_output 'FROM busybox AS devel-test
+WORKDIR /root/demo
+COPY Dockerfile /lint/Dockerfile
+# hadolint ignore=DL3003
+RUN cd /lint && hadolint Dockerfile
+RUN echo "hadolint ignore=DL3059"
+  # hadolint ignore=DL3003
+  RUN  cd  /lint  &&  hadolint Dockerfile && cd / && ls
+RUN pwd'
+}
+
+# why: the migration pass runs on every upgrade, and a pragma binds to the
+# next line only, so one that is already there is extended, not displaced.
+@test "migration 5 (hadolint): DL3003 extends an existing pragma and settles (base#2150)" {
+  cat > "${DF}" <<'EOF'
+FROM busybox AS devel-test
+# hadolint ignore=DL3059
+RUN cd /lint && hadolint Dockerfile
+# hadolint ignore=DL3003,DL3059
+RUN cd /lint && hadolint Dockerfile.b
 EOF
   run bash -c "$(_src); _migrate_hadolint_apply '${DF}'"
   assert_success
-  grep -Fxq 'WORKDIR /lint' "${DF}"
-  grep -Fxq 'RUN hadolint Dockerfile' "${DF}"
-  refute grep -q 'cd /lint &&' "${DF}"
+  run cat "${DF}"
+  assert_output 'FROM busybox AS devel-test
+# hadolint ignore=DL3059,DL3003
+RUN cd /lint && hadolint Dockerfile
+# hadolint ignore=DL3003,DL3059
+RUN cd /lint && hadolint Dockerfile.b'
+  run bash -c "$(_src); _migrate_hadolint_detect '${DF}'"
+  assert_failure
+  cp "${DF}" "${DF}.before"
+  run bash -c "$(_src); apply_migrations '${DF}'"
+  assert_success
+  diff "${DF}.before" "${DF}"
+}
+
+# why: hadolint allows spaces around every part of a pragma, and one it
+# cannot parse ignores nothing. Prose that mentions a pragma is not one.
+@test "migration 5 (hadolint): DL3003 reads a pragma the way hadolint does (base#2150)" {
+  local _before _after _n=0
+  while IFS='|' read -r _before _after; do
+    printf '%s\n' 'FROM busybox AS devel-test' "${_before}" 'RUN cd /lint && hadolint Dockerfile' > "${DF}"
+    run bash -c "$(_src); apply_migrations '${DF}'"
+    assert_success
+    run cat "${DF}"
+    assert_output "FROM busybox AS devel-test
+$(printf '%b' "${_after}")
+RUN cd /lint && hadolint Dockerfile" || fail "from: ${_before}"
+    run bash -c "$(_src); _migrate_hadolint_detect '${DF}'"
+    assert_failure || fail "not settled: ${_before}"
+    (( ++_n ))
+  done <<'EOF'
+# hadolint ignore=DL3059, DL3003|# hadolint ignore=DL3059, DL3003
+# hadolint ignore=DL3003 , DL3059|# hadolint ignore=DL3003 , DL3059
+# hadolint ignore=DL3059, DL3025|# hadolint ignore=DL3059,DL3003, DL3025
+# hadolint ignore = DL3059|# hadolint ignore = DL3059,DL3003
+#  hadolint  ignore= DL3059|#  hadolint  ignore= DL3059,DL3003
+# hadolint ignore=DL3059 # not DL3003|# hadolint ignore=DL3059,DL3003 # not DL3003
+# hadolint ignore=DL3003 because|# hadolint ignore=DL3003 because\n# hadolint ignore=DL3003
+# hadolint ignore=DL3059 DL3003|# hadolint ignore=DL3059 DL3003\n# hadolint ignore=DL3003
+# hadolint ignore=DL3059,|# hadolint ignore=DL3059,\n# hadolint ignore=DL3003
+# hadolint ignore=DL30031|# hadolint ignore=DL30031,DL3003
+# see hadolint ignore=DL3003|# see hadolint ignore=DL3003\n# hadolint ignore=DL3003
+# hadolint global ignore=DL3059|# hadolint global ignore=DL3059\n# hadolint ignore=DL3003
+RUN echo "hadolint ignore=DL3003"|RUN echo "hadolint ignore=DL3003"\n# hadolint ignore=DL3003
+EOF
+  [ "${_n}" -eq 13 ]
+}
+
+# why: a Dockerfile already in the template's shape is the consumer's own
+# and stays as it is.
+@test "migration 5 (hadolint): WORKDIR /lint + RUN hadolint is left alone (base#2150)" {
+  printf '%s\n' 'FROM busybox AS devel-test' 'WORKDIR /lint' 'RUN hadolint Dockerfile' > "${DF}"
+  cp "${DF}" "${DF}.before"
+  run bash -c "$(_src); _migrate_hadolint_detect '${DF}'"
+  assert_failure
+  run bash -c "$(_src); apply_migrations '${DF}'"
+  assert_success
+  diff "${DF}.before" "${DF}"
 }
 
 @test "migration 5 (hadolint): DL3042 adds pip --no-cache-dir (#567)" {
@@ -2500,6 +2809,219 @@ EOF
   run bash -c "$(_src); apply_migrations '${DF}'"
   assert_success
   diff "${TEMP_DIR}/script/entrypoint.sh" "${TEMP_DIR}/ep.orig"
+}
+
+# The two halves have to agree on what is guarded. Detect answers for the
+# file, apply rewrites every source in it: a source detect reads as guarded
+# and apply does not is rewritten the moment another source in the same file
+# is bare.
+
+# _m8_run -- run the entrypoint under test with every /opt/ros/<x>/setup.bash
+#   replaced by a file that, as the real one does, reads an unset variable.
+_m8_run() {
+  printf '%s\n' ': "${M8_UNSET}"' 'echo "sourced"' > "${TEMP_DIR}/third_party.bash"
+  sed -E "s|\"?/opt/ros/[^ \"]*setup\.bash\"?|\"${TEMP_DIR}/third_party.bash\"|" \
+    "${TEMP_DIR}/script/entrypoint.sh" > "${TEMP_DIR}/run.sh"
+  run env -u M8_UNSET bash "${TEMP_DIR}/run.sh"
+}
+
+# why: base#2149 -- ros1_bridge's shape. The `set -u` written between the
+# sources turned nounset back on inside the repo's own bracket, and the
+# container died in the file sourced after it.
+@test "migration 8 (nounset-source): one bracket around several sources is left alone (base#2149)" {
+  mkdir -p "${TEMP_DIR}/script"
+  : > "${DF}"
+  cat > "${TEMP_DIR}/script/entrypoint.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+set +u
+# shellcheck source=/dev/null
+source "/opt/ros/\${ROS1_DISTRO}/setup.bash" --
+# shellcheck source=/dev/null
+source "/opt/ros/\${ROS2_DISTRO}/setup.bash" --
+# an overlay built elsewhere
+if [[ -f "${TEMP_DIR}/third_party.bash" ]]; then
+    # shellcheck source=/dev/null
+    source "${TEMP_DIR}/third_party.bash" --
+fi
+set -u
+[[ "\$-" == *u* ]] && echo "nounset restored"
+EOF
+  cp "${TEMP_DIR}/script/entrypoint.sh" "${TEMP_DIR}/ep.orig"
+  run bash -c "$(_src); apply_migrations '${DF}'"
+  assert_success
+  _m8_run
+  assert_success
+  assert_line --index 2 'sourced'
+  assert_line --index 3 'nounset restored'
+  diff "${TEMP_DIR}/ep.orig" "${TEMP_DIR}/script/entrypoint.sh"
+  run bash -c "$(_src); _migrate_nounset_source_detect '${DF}'"
+  assert_failure
+}
+
+# why: base#2149 -- apply skipped a guard whose source carries a shellcheck
+# directive, so it bracketed the guarded source a second time.
+@test "migration 8 (nounset-source): only the bare source of a mixed file is bracketed (base#2149)" {
+  mkdir -p "${TEMP_DIR}/script"
+  : > "${DF}"
+  cat > "${TEMP_DIR}/script/entrypoint.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+set +u
+# shellcheck source=/dev/null
+source "/opt/ros/a/setup.bash"
+set -u
+# shellcheck source=/dev/null
+source "/opt/ros/b/setup.bash"
+# source "/opt/ros/c/setup.bash"
+echo end
+# shellcheck disable=SC2034
+EOF
+  run bash -c "$(_src); apply_migrations '${DF}'"
+  assert_success
+  run cat "${TEMP_DIR}/script/entrypoint.sh"
+  assert_output '#!/usr/bin/env bash
+set -euo pipefail
+set +u
+# shellcheck source=/dev/null
+source "/opt/ros/a/setup.bash"
+set -u
+set +u
+# shellcheck source=/dev/null
+source "/opt/ros/b/setup.bash"
+set -u
+# source "/opt/ros/c/setup.bash"
+echo end
+# shellcheck disable=SC2034'
+  _m8_run
+  assert_success
+  assert_output 'sourced
+sourced
+end'
+}
+
+# why: base#2149 -- a bracket is whatever turns nounset off, not the one
+# spelling on the line above. Each body is guarded as written.
+@test "migration 8 (nounset-source): every spelling of a bracket is read as one (base#2149)" {
+  mkdir -p "${TEMP_DIR}/script"
+  : > "${DF}"
+  local _body _n=0
+  while IFS= read -r _body; do
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n%b\necho end\n' "${_body}" \
+      > "${TEMP_DIR}/script/entrypoint.sh"
+    _m8_run
+    assert_success || fail "the case itself is not guarded: ${_body}"
+    cp "${TEMP_DIR}/script/entrypoint.sh" "${TEMP_DIR}/ep.orig"
+    run bash -c "$(_src); apply_migrations '${DF}'"
+    assert_success
+    diff "${TEMP_DIR}/ep.orig" "${TEMP_DIR}/script/entrypoint.sh" || fail "rewritten: ${_body}"
+    # Detect aside: apply on its own leaves a guarded source alone too.
+    run bash -c "$(_src); _migrate_nounset_source_apply '${DF}'"
+    assert_success
+    diff "${TEMP_DIR}/ep.orig" "${TEMP_DIR}/script/entrypoint.sh" || fail "apply rewrote: ${_body}"
+    (( ++_n ))
+  done <<'EOF'
+set +u\n# a note\n\nexport A=1\nsource /opt/ros/a/setup.bash\nset -u
+set +u  # ROS reads unset variables\nsource /opt/ros/a/setup.bash\nset -u
+set +eu\nsource /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash\nset -eu
+set +o nounset\nsource /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash\nset -o nounset
+set +e +u\nsource /opt/ros/a/setup.bash\nset -e -u
+set +u; source /opt/ros/a/setup.bash; set -u
+set +u && . /opt/ros/a/setup.bash\n. /opt/ros/b/setup.bash\nset -u
+set +u\nset -e\nset -o pipefail\nsource /opt/ros/a/setup.bash\nset -u
+if true; then\n  set +u\n  # shellcheck source=/dev/null\n  source /opt/ros/a/setup.bash\n  source /opt/ros/b/setup.bash\n  set -u\nfi
+set +u\nif false; then\n  set -u\nfi\nsource /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash\nset -u
+set +u\n  # set -u\nsource /opt/ros/a/setup.bash\nset -u
+set +u\n(set -u; echo quiet >/dev/null)\nsource /opt/ros/a/setup.bash\nset -u
+set +u\n(\n  set -u\n  :\n)\nsource /opt/ros/a/setup.bash\nset -u
+set +u\nif false; then set -u; fi\nsource /opt/ros/a/setup.bash\nset -u
+if true; then set +u; fi\nsource /opt/ros/a/setup.bash\nset -u
+set +o posix +u\nsource /opt/ros/a/setup.bash\nset -u
+set +u\nsort -u /dev/null\nsource /opt/ros/a/setup.bash\nset -u
+set +u\n(\nset -u\n  set +u\n)\nif false; then\n  set -u\nfi\nsource /opt/ros/a/setup.bash\nset -u
+if true; then\n  set +u\nfi\nset +u\nif false; then\n  set -u\nfi\nsource /opt/ros/a/setup.bash\nset -u
+setup_ros() { set +u; source /opt/ros/a/setup.bash; set -u; }\nsetup_ros
+(set +u; source /opt/ros/a/setup.bash)
+EOF
+  [ "${_n}" -eq 21 ]
+}
+
+# why: the direction that must not be lost. A bracket ends at its `set -u`,
+# and a source after it is bare whatever was guarded above.
+@test "migration 8 (nounset-source): a source after the bracket ends is still bracketed (base#2149)" {
+  mkdir -p "${TEMP_DIR}/script"
+  : > "${DF}"
+  local _body _n=0
+  while IFS= read -r _body; do
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n%b\necho end\n' "${_body}" \
+      > "${TEMP_DIR}/script/entrypoint.sh"
+    _m8_run
+    assert_failure || fail "the case itself is guarded: ${_body}"
+    run bash -c "$(_src); apply_migrations '${DF}'"
+    assert_success
+    _m8_run
+    assert_success || fail "still bare: ${_body}"
+    assert_output --partial $'sourced\nsourced\nend'
+    run bash -c "$(_src); _migrate_nounset_source_detect '${DF}'"
+    assert_failure || fail "not settled: ${_body}"
+    (( ++_n ))
+  done <<'EOF'
+source /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash
+set +u\nsource /opt/ros/a/setup.bash\nset -u\nsource /opt/ros/b/setup.bash
+set +u\nsource /opt/ros/a/setup.bash\nset -eu -o pipefail\nsource /opt/ros/b/setup.bash
+set +o nounset\nsource /opt/ros/a/setup.bash\nset -o nounset\nsource /opt/ros/b/setup.bash
+set +u; source /opt/ros/a/setup.bash; set -u\nsource /opt/ros/b/setup.bash
+set +e\nsource /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash
+# set +u\nsource /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash
+echo "set +u"\nsource /opt/ros/a/setup.bash\nsource /opt/ros/b/setup.bash
+if true; then\n  set +u\n  source /opt/ros/a/setup.bash\n  set -u\nfi\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash)\nsource /opt/ros/b/setup.bash
+(\n  set +u\n  source /opt/ros/a/setup.bash\n)\nsource /opt/ros/b/setup.bash
+source /opt/ros/a/setup.bash; set +u\nsource /opt/ros/b/setup.bash\nset -u
+if true; then\n  set +u\n  (set -u; :)\n  source /opt/ros/a/setup.bash\n  set -u\nfi\nsource /opt/ros/b/setup.bash
+set +u; if true; then . /opt/ros/a/setup.bash; fi; set -u\nsource /opt/ros/b/setup.bash
+set +u; { . /opt/ros/a/setup.bash; }; set -u\nsource /opt/ros/b/setup.bash
+set +u; for _x in 1; do . /opt/ros/a/setup.bash; done; set -u\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash) || true\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash) # quiet\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash) </dev/null\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash) >&1\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash); :\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash) & wait\nsource /opt/ros/b/setup.bash
+set +u; case x in x) . /opt/ros/a/setup.bash; esac; set -u\nsource /opt/ros/b/setup.bash
+(set +u; source /opt/ros/a/setup.bash) 2>/dev/null\nsource /opt/ros/b/setup.bash
+EOF
+  [ "${_n}" -eq 24 ]
+
+  # A path put together by a pipeline is a source too.
+  printf '%s\n' 'set -eu' '. "$(ls -d /opt/ros/* | tail -n 1)/setup.bash"' > "${TEMP_DIR}/script/entrypoint.sh"
+  run bash -c "$(_src); _migrate_nounset_source_detect '${DF}'"
+  assert_success
+}
+
+# why: where a function body stands in the file says nothing about when it
+# runs. One written above the `set -u` is called below it.
+@test "migration 8 (nounset-source): a function written before nounset is turned on is still bracketed (base#2149)" {
+  mkdir -p "${TEMP_DIR}/script"
+  : > "${DF}"
+  cat > "${TEMP_DIR}/script/entrypoint.sh" <<'EOF'
+#!/usr/bin/env bash
+setup_ros() {
+  source /opt/ros/a/setup.bash
+}
+set -euo pipefail
+setup_ros
+echo end
+EOF
+  _m8_run
+  assert_failure
+  run bash -c "$(_src); apply_migrations '${DF}'"
+  assert_success
+  _m8_run
+  assert_success
+  assert_output $'sourced\nend'
+  run bash -c "$(_src); _migrate_nounset_source_detect '${DF}'"
+  assert_failure
 }
 
 @test "migration 8 (nounset-source): detect false when no set -u in entrypoint (#579)" {

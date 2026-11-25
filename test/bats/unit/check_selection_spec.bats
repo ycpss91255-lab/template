@@ -26,15 +26,17 @@ setup() {
   AT_BASE_SH=/source/script/ci/selection_at_base.sh
 }
 
-# The nine map names, in the map's output order (design r7 sec. 2): one
+# The eleven map names, in the map's output order: the nine of base#1584
+# (design r7 sec. 2), then mutation-roster and test-tools-image-arm64,
+# which a docs-only pull request skips (base#2110). There is one
 # per select_* key classify writes. Each self-test.yaml job whose `if:`
 # reads classify reads one of these keys; config-gen names the one key,
 # select_config_gen, that both config-gen-gates and config-gen-redpath
 # read (base#1547 split one job in two). classify_testtools_spec.bats
 # (cycle 4) holds the workflow's gated jobs to these keys.
-GATED_JOBS="config-gen coverage coverage-gate acceptance system worker-selftest shellcheck hadolint bats-fragile"
+GATED_JOBS="config-gen coverage coverage-gate acceptance system worker-selftest shellcheck hadolint bats-fragile mutation-roster test-tools-image-arm64"
 # Every gated job but config-gen: what a config-gen deny-list path runs.
-NOT_CONFIG_GEN="coverage coverage-gate acceptance system worker-selftest shellcheck hadolint bats-fragile"
+NOT_CONFIG_GEN="coverage coverage-gate acceptance system worker-selftest shellcheck hadolint bats-fragile mutation-roster test-tools-image-arm64"
 
 # _select <event> <path>...
 #   Runs the map with <path>... as the whole diff of a <event> run.
@@ -44,7 +46,7 @@ _select() {
   printf '%s\0' "$@" | bash "${SELECTION_SH}" --event "${_event}" --paths
 }
 
-# _expect [all | <job>...] -- the nine lines in the map's order, each job
+# _expect [all | <job>...] -- one line per map name in the map's order, each job
 #   `false` unless named here, or every job `true` for `all`.
 _expect() {
   local _job _v _out=""
@@ -106,10 +108,9 @@ _commit() {
   assert_output "$(_expect)"
 }
 
-# why: cycle 4's job list. The map's names are the nine select_* keys of
-# design r7, config-gen standing for both config-gen jobs; --jobs must
+# why: cycle 4's job list. The map's names are the select_* keys, config-gen standing for both config-gen jobs; --jobs must
 # name exactly those, in the output order.
-@test "check_selection: --jobs prints the nine map names, one per select key (base#1584)" {
+@test "check_selection: --jobs prints the map names, one per select key (base#1584, base#2110)" {
   run bash "${SELECTION_SH}" --jobs
   assert_success
   assert_output "$(tr ' ' '\n' <<<"${GATED_JOBS}")"
@@ -238,6 +239,51 @@ _commit() {
   _assert_all_selected no_merge_base
 }
 
+# why: base#2110. With two merge bases the three-dot diff is taken from one
+# of them, so it can hide a change the merge would make (a pull request that
+# holds a commit already on the base and its revert, seen from a criss-cross
+# history). More than one merge base selects every job.
+@test "check_selection: more than one merge base selects every gated job with its reason (base#2110)" {
+  _scratch_repo
+  git checkout -q -b side
+  printf 'side\n' > doc/side.md
+  _commit side
+  git checkout -q main
+  printf 'x\n' > script/ci/x.sh
+  _commit code
+  git checkout -q -b one main
+  git -c user.name=t -c user.email=t@t merge -q --no-edit side
+  git checkout -q side
+  git -c user.name=t -c user.email=t@t merge -q --no-edit main
+  git rm -q script/ci/x.sh
+  _commit revert
+  git branch -q -f main one
+  [ "$(git merge-base --all main HEAD | wc -l)" -eq 2 ]
+  run bash -c "bash '${SELECTION_SH}' --event pull_request --base main 2>&1"
+  _assert_all_selected many_merge_bases
+}
+
+# why: base#2110. `ignore = all` in .gitmodules hides a submodule's new
+# commit from a plain diff, so the diff must ask for it.
+@test "check_selection: a submodule bump hidden by .gitmodules selects every gated job (base#2110)" {
+  _scratch_repo
+  local _a _b
+  _a="$(git rev-parse HEAD)"
+  printf '[submodule "s"]\n\tpath = s\n\turl = ./s\n\tignore = all\n' > .gitmodules
+  git add .gitmodules
+  git update-index --add --cacheinfo "160000,${_a},s"
+  git -c user.name=t -c user.email=t@t commit -q -m sub
+  _b="$(git rev-parse HEAD)"
+  git checkout -q -b case
+  printf 'more\n' >> doc/seed.md
+  git add doc/seed.md
+  git update-index --cacheinfo "160000,${_b},s"
+  git -c user.name=t -c user.email=t@t commit -q -m bump
+  run _diff_select
+  assert_success
+  assert_output "$(_expect all)"
+}
+
 # why: cycle 20. A deny list that exits non-zero or prints nothing cannot
 # say which paths config-gen ignores, so nothing may be dropped.
 @test "check_selection: an unreadable deny list selects every gated job (base#1584)" {
@@ -258,7 +304,7 @@ _commit() {
 @test "check_selection: a unit spec runs coverage and the code checks only (base#1584)" {
   run _select pull_request test/bats/unit/ci_spec.bats
   assert_success
-  assert_output "$(_expect coverage coverage-gate shellcheck hadolint bats-fragile)"
+  assert_output "$(_expect coverage coverage-gate shellcheck hadolint bats-fragile mutation-roster test-tools-image-arm64)"
 }
 
 # why: the E1 row for a system spec: system runs the system specs, so it
@@ -266,7 +312,7 @@ _commit() {
 @test "check_selection: a system spec runs coverage, system and the code checks (base#1584)" {
   run _select pull_request test/bats/system/smoke_spec.bats
   assert_success
-  assert_output "$(_expect coverage coverage-gate system worker-selftest shellcheck hadolint bats-fragile)"
+  assert_output "$(_expect coverage coverage-gate system worker-selftest shellcheck hadolint bats-fragile mutation-roster test-tools-image-arm64)"
 }
 
 # why: every justfile loads with the root one, and a syntax error in one
@@ -291,6 +337,92 @@ _commit() {
     assert_success
     assert_output "$(_expect all)"
   done
+}
+
+# why: base#2110. Nothing under doc/ but Markdown is documentation by its
+# name alone: a script, a justfile, an image or a page moved there can be
+# run or read by code, so it is a path nobody classified.
+@test "check_selection: a path under doc/ that is not Markdown selects every gated job (base#2110)" {
+  local _p
+  for _p in doc/build.sh doc/justfile doc/README doc/badge/coverage.svg \
+            doc/arch/overview.html doc/a.md.sh doc/Dockerfile doc/.md/x.sh; do
+    run _select pull_request "${_p}"
+    assert_success
+    assert_output "$(_expect all)"
+  done
+}
+
+# _diff_select -- the map's answer for the current branch's diff against main.
+_diff_select() {
+  bash "${SELECTION_SH}" --event pull_request --base main 2>&1
+}
+
+# why: base#2110. A name says nothing about the file's mode: a symlink, an
+# executable or a submodule named doc/x.md is not documentation, and
+# neither is README.md once it becomes a link. The map reads both sides'
+# modes with the diff, so a link replaced by a plain file counts too.
+@test "check_selection: a documentation name that is a symlink, executable or submodule selects every gated job (base#2110)" {
+  _scratch_repo
+  local _blob _case _obj
+  printf 'r\n' > README.md
+  _commit readme
+  _blob="$(printf '../script/ci/check_selection.sh' | git hash-object -w --stdin)"
+  for _case in '120000 doc/link.md' '120000 README.md' '100755 doc/seed.md' '160000 doc/sub.md'; do
+    _obj="${_blob}"
+    [[ "${_case}" == 160000* ]] && _obj="$(git rev-parse HEAD)"
+    git checkout -q -f -B case main
+    git update-index --add --cacheinfo "${_case%% *},${_obj},${_case#* }"
+    git -c user.name=t -c user.email=t@t commit -q -m "${_case}"
+    run _diff_select
+    assert_success
+    assert_output "$(_expect all)"
+  done
+  git checkout -q -f main
+  git update-index --add --cacheinfo "120000,${_blob},doc/was-link.md"
+  git -c user.name=t -c user.email=t@t commit -q -m link
+  git checkout -q -f -B case main
+  git update-index --add --cacheinfo "100644,${_blob},doc/was-link.md"
+  git -c user.name=t -c user.email=t@t commit -q -m plain
+  run _diff_select
+  assert_success
+  assert_output "$(_expect all)"
+}
+
+# why: base#2110. Code cannot be passed off as documentation through the
+# shape of the diff: one code line beside a doc edit, a script renamed
+# into doc/, and a deleted script each select every job. The control is a
+# plain doc edit, addition and deletion, which select none.
+@test "check_selection: a doc diff that also changes, moves or deletes code selects every gated job (base#2110)" {
+  _scratch_repo
+  printf 'old\n' > doc/old.md
+  printf 'one\ntwo\nthree\n' > script/ci/tool.sh
+  _commit seed
+  git checkout -q -b docs
+  printf 'more\n' >> doc/seed.md
+  printf 'new\n' > doc/new.md
+  git rm -q doc/old.md
+  _commit docs
+  run _diff_select
+  assert_success
+  assert_output "$(_expect)"
+
+  git checkout -q -B mixed docs
+  printf 'x\n' >> script/ci/tool.sh
+  _commit mixed
+  run _diff_select
+  assert_output "$(_expect all)"
+
+  git checkout -q -B moved docs
+  git mv script/ci/tool.sh doc/tool.md
+  _commit moved
+  run _diff_select
+  assert_output "$(_expect all)"
+
+  git checkout -q -B deleted docs
+  git rm -q script/ci/tool.sh
+  _commit deleted
+  run _diff_select
+  assert_output "$(_expect all)"
 }
 
 # why: cycle 28. The base map is run from a scratch directory, so it must

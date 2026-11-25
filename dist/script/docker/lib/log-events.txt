@@ -208,6 +208,7 @@ upgrade_merge_aborted
 upgrade_untracked_snapshot_failed
 upgrade_subtree_local_drift
 upgrade_subtree_local_drift_detail
+upgrade_worker_refs_left
 upgrade_version_check
 upgrade_available
 upgrade_up_to_date

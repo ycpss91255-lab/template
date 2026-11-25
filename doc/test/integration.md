@@ -1,6 +1,6 @@
 # Integration Tests
 
-Integration specs under `test/bats/integration/`: **285 tests**.
+Integration specs under `test/bats/integration/`: **288 tests**.
 
 > Part of the `just test` self-test suite — what runs in the `Self Test`
 > CI job. See [TEST.md](TEST.md) for the index across all test levels and
@@ -544,7 +544,7 @@ would restore the silence.
 | `test-tools image: the bundled toml-bridge emits the KV lines conf.sh reads (#1222)` | KV is the mode conf.sh actually loads a config through, and it is the one that carries a TYPE decision across the boundary: an unquoted TOML integer has to arrive as the bare digits bash compares, not as a quoted string or a Python repr. |
 | `test-tools image: the bundled toml-bridge refuses malformed TOML under its own name (#1222)` | The case that keeps the two above from being satisfied by anything that merely produces bytes. A real parser REFUSES malformed input and says so under its own name; an interpreter that never started fails too, which is why the message is read and not just the status. |
 
-### test/bats/integration/upgrade_spec.bats (51)
+### test/bats/integration/upgrade_spec.bats (54)
 
 End-to-end verification for `upgrade.sh` driving a real subtree update
 against a fake template remote (bare repo with `v0.9.5` / `v0.9.7` tags on a
@@ -564,6 +564,9 @@ run.
 |------|-------------|
 | `upgrade.sh v0.9.7: bumps .base/.version, pulls new content, updates main.yaml` | - |
 | `upgrade.sh v0.9.7: the upgrade commit names the refs it actually rewrote (#1112)` | The commit message used to assert a general rule, and it was false on exactly the repos whose unnamed worker ref it had just left behind (#1112) |
+| `upgrade.sh v0.9.7: the upgrade commit tells a moved org from a bumped @ref (base#2118)` | A ref that is not a release tag moves to the current org but is not bumped, so a commit message that lists it as updated to the new version records something that did not happen (base#2118) |
+| `upgrade.sh v0.9.7: the upgrade commit names every bumped worker and no other (base#2118)` | The message names what changed, so it has to read the ref that changed: a comment behind it, or a second ref on the same line, must not stand in for it, and a worker two jobs call is still one worker (base#2118) |
+| `upgrade.sh v0.9.7: a worker ref the rewrite cannot reach is reported (base#2118)` | A ref the rewrite cannot reach stays at an org that no longer resolves, or at the old release. Exiting 0 over it and recording that nothing needed updating hides a job that will fail on the next run (base#2118) |
 | `upgrade.sh Step 5 announces the migration pass (#567)` | Step 5 runs the declarative migration dispatcher |
 | `upgrade.sh heals a legacy wrapper-COPY Dockerfile via the migration list (#567 m1)` | End-to-end wrapper-copy heal + staged into the upgrade commit |
 | `upgrade.sh nounset-guards a sibling entrypoint ROS source (#567 m8 / #579)` | End-to-end entrypoint nounset guard around the ROS setup.bash source |

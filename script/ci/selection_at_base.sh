@@ -11,9 +11,11 @@
 # list out of <ref> with `git show <ref>:script/ci/<file>` into a scratch
 # directory and runs that copy, with the working directory left at the
 # checkout so its `git diff` still sees HEAD. The working tree's map is
-# never run, so a pull request that edits the map, the deny list, the
-# readers script or this file is judged by the base map, to which each of
-# those files is an unknown path that selects every job.
+# never run, so a pull request that edits the map, the deny list or the
+# readers script is judged by the base map, to which each of those files is
+# an unknown path that selects every job. This file judges by the base only
+# when it is itself the base's: classify reads it with `git show` too
+# (base#2110), and `test.sh --selection` runs the working tree's.
 #
 # --diff passes `--base <ref>` to the map; --paths passes stdin through.
 #

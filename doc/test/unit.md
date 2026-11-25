@@ -1146,7 +1146,7 @@ Pure git + filesystem, no docker.
 | `changelog layout: no [Unreleased] anywhere is refused, not passed` | The same rule in the direction that fails open: with no live series every placement rule holds and the tree reports clean, while there is nowhere left to write the next entry. |
 | `changelog layout: a changelog directory with no series files DIES` | The vacuous pass this repo keeps paying for. With nothing to walk, every rule above holds and the lint prints a green line that means the scan found nothing, not that nothing is wrong. |
 
-### test/bats/unit/check_selection_spec.bats (25)
+### test/bats/unit/check_selection_spec.bats (30)
 
 classify gave every heavy job one answer, code_changed, so a PR that touched
 one config-gen spec and two docs ran config-gen and all twelve coverage
@@ -1165,7 +1165,7 @@ and the probes cited per case, never from the map's own output.
 |------|-------------|
 | `check_selection: a pull request touching only a path no row names selects every gated job (base#1584)` | the issue's fail-closed rule, "an unknown path selects every job". |
 | `check_selection: a pull request touching only docs selects no gated job (base#1584)` | the docs allow-list classify's code_changed gate already uses (doc/**, README.md, LICENSE, CONTEXT.md) and the issue's "a docs-only PR": a docs-only diff affects no gated job. |
-| `check_selection: --jobs prints the nine map names, one per select key (base#1584)` | cycle 4's job list. The map's names are the nine select_* keys of design r7, config-gen standing for both config-gen jobs; --jobs must name exactly those, in the output order. |
+| `check_selection: --jobs prints the map names, one per select key (base#1584, base#2110)` | cycle 4's job list. The map's names are the select_* keys, config-gen standing for both config-gen jobs; --jobs must name exactly those, in the output order. |
 | `check_selection: a push run selects every gated job even when its diff is docs only (base#1584)` | the issue's rule "On push, tag and workflow_dispatch everything runs" (main runs the full suite, owner 2026-11-10). |
 | `check_selection: a deny-list path drops config-gen and keeps every other gated job (base#1584)` | cycle 15. dist/script/base/init.sh and script/release/changelog_index.sh are non-readers in the traced config-gen host run (config_gen_paths_spec.bats re-runs the tracer), and neither is in _rp_copy (script/test/config_gen_redpath.sh). Each drops config-gen and keeps every other job, so the deny list is not too small to ever narrow. |
 | `check_selection: a new or nested path under dist/ or script/ runs config-gen (base#1584)` | cycle 16 (R2-F1, RR4-F3). A path the deny list does not name exactly -- a new file, a file in a new directory -- runs config-gen. The first two printed config-gen=false through the old glob rows (review round 1, F1). |
@@ -1176,11 +1176,16 @@ and the probes cited per case, never from the map's own output.
 | `check_selection: an unterminated last record is still read (base#1584)` | cycle 18. `read -d ''` drops a final record with no NUL, so `doc/a.md<NUL>zz/x` read as docs only. zz/x is an unknown path. |
 | `check_selection: a clean NUL-terminated docs record selects nothing (base#1584)` | cycle 18's control: a clean docs record still selects nothing, so the control-byte check does not reject clean input. |
 | `check_selection: an unreadable diff base selects every gated job with its reason (base#1584)` | cycle 19 (RR3-F3). An empty base reads as HEAD to git (`git diff "...HEAD"` exits 0 with no output, measured), a missing ref names no commit, base == HEAD is a diff with no path, and an orphan HEAD has no merge base (`git diff main...HEAD` exits 128 there, measured). Each selects every job and names its reason. |
+| `check_selection: more than one merge base selects every gated job with its reason (base#2110)` | base#2110. With two merge bases the three-dot diff is taken from one of them, so it can hide a change the merge would make (a pull request that holds a commit already on the base and its revert, seen from a criss-cross history). More than one merge base selects every job. |
+| `check_selection: a submodule bump hidden by .gitmodules selects every gated job (base#2110)` | base#2110. `ignore = all` in .gitmodules hides a submodule's new commit from a plain diff, so the diff must ask for it. |
 | `check_selection: an unreadable deny list selects every gated job (base#1584)` | cycle 20. A deny list that exits non-zero or prints nothing cannot say which paths config-gen ignores, so nothing may be dropped. |
 | `check_selection: a unit spec runs coverage and the code checks only (base#1584)` | the E1 row. A unit or integration spec is a leaf -- no file under test/ or script/ loads or sources a `*_spec.bats` -- so config-gen, acceptance and system never execute it; it is code, so coverage and the code checks run. |
 | `check_selection: a system spec runs coverage, system and the code checks (base#1584)` | the E1 row for a system spec: system runs the system specs, so it and worker-selftest stay; config-gen and acceptance drop. |
 | `check_selection: a justfile anywhere selects every gated job (base#1584)` | every justfile loads with the root one, and a syntax error in one module made `just a go` exit 1 in a scratch probe, so any justfile can break `just test go`. |
 | `check_selection: the workflow, a driver, the selection files and the unit helper select every gated job (base#1584)` | the issue's rule: "A change to the map itself, the workflow, the test drivers or shared libraries selects every job (fail closed)". None of these is a docs path, a spec leaf or a deny entry. |
+| `check_selection: a path under doc/ that is not Markdown selects every gated job (base#2110)` | base#2110. Nothing under doc/ but Markdown is documentation by its name alone: a script, a justfile, an image or a page moved there can be run or read by code, so it is a path nobody classified. |
+| `check_selection: a documentation name that is a symlink, executable or submodule selects every gated job (base#2110)` | base#2110. A name says nothing about the file's mode: a symlink, an executable or a submodule named doc/x.md is not documentation, and neither is README.md once it becomes a link. The map reads both sides' modes with the diff, so a link replaced by a plain file counts too. |
+| `check_selection: a doc diff that also changes, moves or deletes code selects every gated job (base#2110)` | base#2110. Code cannot be passed off as documentation through the shape of the diff: one code line beside a doc edit, a script renamed into doc/, and a deleted script each select every job. The control is a plain doc edit, addition and deletion, which select none. |
 | `selection_at_base: a working tree without the map gets the base map's answer (base#1584)` | cycle 28. The base map is run from a scratch directory, so it must read nothing but the deny list beside it: a working tree with NO selection files still gets the base map's answer. |
 | `selection_at_base: a working-tree map cannot narrow the selection (base#1584)` | cycle 28, the narrowing half. A working-tree map that drops config-gen for everything must not narrow anything: the base map runs. |
 | `selection_at_base: a base it cannot judge from selects every gated job with its reason (base#1584)` | selection_at_base.sh's own fail-closed reasons: an empty or bad base, and a base that has no map or no deny list (main before this change, and any base older than it). The names come from the working tree's --jobs. |
@@ -1583,7 +1588,7 @@ code, base#1562.
 | `_run_via_compose: the real ids are in the environment compose interpolates (#895)` | - |
 | `_fix_permissions: refuses a non-numeric id instead of handing it to chown (#895)` | - |
 
-### test/bats/unit/classify_testtools_spec.bats (23)
+### test/bats/unit/classify_testtools_spec.bats (27)
 
 `testtools_changed` tells every image-consuming job whether to rebuild the
 tooling image from source instead of pulling the rolling `:main`. On a pull
@@ -1609,20 +1614,24 @@ reads the output the step writes.
 | `classify: a PR that changes a file the Dockerfile COPYs rebuilds it (#1171)` | The same miss on the arm every pull request takes, which is the expensive one: the PR arm's `false` sends `obtain_test_tools.sh` down its layer-2 path, so the whole suite runs inside the rolling `:main` -- an image built before the edit, and one nothing on the PR path refreshes. |
 | `classify: a PR that changes nothing the image reads still pulls (#1171)` | The guard that keeps the two cases above from being bought by answering `true` to everything. "Anything changed" would rebuild the tooling image on every pull request and throw away the pull path the rolling tag exists for. |
 | `classify: a PR that changes the test-tools Dockerfile rebuilds it (#1171)` | The Dockerfile's own case on the PR arm, pinned alongside the two above so a rewrite that reaches for the derivation cannot drop the one input the signal already had. |
-| `classify: a push writes every gated job's selection as true (base#1584)` | cycle 6. Main runs the full suite (owner decision, base#1584), so the push arm writes all nine select_* keys `true`. |
-| `classify: a merge_group run writes every gated job's selection as true (base#1584, base#1587)` | a merge group is the last run before main (base#1587), and only a pull request narrows the selection (base#1584). So a merge_group run writes all nine select_* keys `true` even when its diff is docs only, or the queue would land a commit whose gated jobs never ran. |
-| `self-test.yaml: mutation-roster has no if: and the job list is main's (base#1584)` | cycle 6. mutation-roster keeps main's form: no `if:` (roster row selection belongs to base#1604), and the workflow's job list is main's (`git show origin/main:.github/workflows/self-test.yaml`, re-measured in redesign r6). base#1588 adds the two ungated test-tools-image builders after classify; base#1629 adds the ungated single-issue-pr before mutation-roster. base#1989 adds the ungated commit-attribution job before ci-rollup. |
+| `classify: a push writes every gated job's selection as true (base#1584)` | cycle 6. Main runs the full suite (owner decision, base#1584), so the push arm writes every select_* key `true`. |
+| `classify: a merge_group run writes every gated job's selection as true (base#1584, base#1587)` | a merge group is the last run before main (base#1587), and only a pull request narrows the selection (base#1584). So a merge_group run writes every select_* key `true` even when its diff is docs only, or the queue would land a commit whose gated jobs never ran. |
+| `self-test.yaml: mutation-roster is gated on its own key and the job list is main's (base#1584, base#2110)` | cycle 6. A docs-only pull request cannot change a roster row's verdict, so mutation-roster is gated on its own key (base#2110; choosing rows from a diff belongs to base#1604). The workflow's job list is main's (`git show origin/main:.github/workflows/self-test.yaml`, re-measured in redesign r6). base#1588 adds the two ungated test-tools-image builders after classify; base#1629 adds the ungated single-issue-pr before mutation-roster. base#1989 adds the ungated commit-attribution job before ci-rollup. |
 | `classify: a pull request touching an unknown path writes every gated job's selection as true (base#1584)` | cycle 24, the issue's fail-closed rule: a pull request touching a path the map does not know runs every gated job. `zz-new/thing.txt` names no directory the repo has. |
 | `classify: a docs-only pull request writes every gated job's selection as false (base#1584)` | cycle 21 (RR3-F1). A docs path selects nothing: the map's doc row is the code_changed allow-list (doc/**, README.md, LICENSE, CONTEXT.md). The base commit holds a real copy of /source/script, so the real map and deny list are read from the base through `git show`. Each value is exact: a classify that never carries a `false` through fails here. |
 | `classify: a pull request changing one unit spec selects coverage and the code checks only (base#1584)` | cycle 22 (RR3-F1). A unit spec is a leaf (row E1): coverage and the code checks run; config-gen, acceptance, system and worker-selftest do not. |
+| `classify: a fork pull request, or one not known to be same-repo, selects every gated job (base#2110)` | base#2110. A fork's pull request is never narrowed: classify answers `true` for every key, and so does a run that cannot say whether it is a fork. |
+| `classify: a pull request not known to target the default branch selects every gated job (base#2110)` | base#2110. A pull request into any other branch can be retargeted at the default branch without a new run, so its diff against the other branch would stand for the one that merges. Only a pull request into the default branch is narrowed, and not knowing is not being one. A branch whose name differs only in case is another branch (GitHub's own == ignores case). |
+| `classify: a tag named like the base branch does not stand in for it (base#2110)` | base#2110. `origin/main` as a bare name resolves to a tag of that name before the remote branch, so a pushed tag could stand in for the base. The step names the remote branch in full. |
+| `classify: a pull request's own selection_at_base.sh does not judge it (base#2110)` | base#2110. The script that runs the base side's map is read from the base too: one read from the pull request could answer without the map. |
 | `classify: a base map that fails or leaves a job out selects it (base#1584)` | cycle 23. A selection that exits non-zero gave no answer, and a line the selection leaves out is no `false`: classify writes `true` for both, and keeps the map's own values for every line it did print. |
 | `classify: a pull request that edits a selection file is judged by the base map (base#1584)` | cycle 26 (RR6-F1). A PR is judged by the BASE side's map, never its own: a PR whose map selects nothing for an unknown path, and which changes that map, would otherwise classify itself with it and skip every job (RR6-F1's probe printed all five false). Each selection file a PR edits is an unknown path to the base map, so every job runs. |
 | `classify: a base without the map or its deny list selects every gated job (base#1584)` | cycle 27, the bootstrap. A base with no map or no deny list (main when this change lands, and any older base) cannot judge the PR, so every job runs, naming map_missing_on_base. |
 | `classify: the diff step's only select_* false is the selection's own (base#1584)` | cycle 29. The classify step cannot invent a `false`: its one selection call is selection_at_base.sh, the only `false` it can write for a select_* key is the one it read (`[[ "${val}" == "false" ]]`), and no line writes a literal select_*=false. |
-| `chain: a PR changing one unit spec runs the code checks and mutation-roster, skips the other gated jobs, and the rollup passes (base#1584)` | cycle 1, end to end on a PR that changes one unit spec. The expected set comes from the issue and the design, not from the map: a unit spec cannot affect config-gen, acceptance, system or worker-selftest, so those skip (config-gen is two jobs since base#1547, config-gen-gates and config-gen-redpath, on one key); it is code, so shellcheck, hadolint, bats-fragile, coverage and coverage-gate run; and mutation-roster keeps main's form, no `if:` (roster row selection belongs to base#1604), so it runs on every PR. Read through classify's real step, its `outputs:` map, every job's parsed `if:` and the real rollup step, so a gate that reads the wrong output, an output classify does not export, or a classify that never carries a `false` all change the set, and the rollup must pass the run that results. |
-| `chain: a docs-only PR skips every gated job, runs mutation-roster, and the rollup passes as doc-only (base#1584)` | cycle 2. A docs-only PR skips every gated job (ten: the nine keys, with select_config_gen gating both config-gen jobs), still runs mutation-roster (no `if:`), and the rollup passes and says so. |
+| `chain: a PR changing one unit spec runs the code checks and mutation-roster, skips the other gated jobs, and the rollup passes (base#1584)` | cycle 1, end to end on a PR that changes one unit spec. The expected set comes from the issue and the design, not from the map: a unit spec cannot affect config-gen, acceptance, system or worker-selftest, so those skip (config-gen is two jobs since base#1547, config-gen-gates and config-gen-redpath, on one key); it is code, so shellcheck, hadolint, bats-fragile, coverage and coverage-gate run; and mutation-roster runs on every PR that is not docs only (base#2110). Read through classify's real step, its `outputs:` map, every job's parsed `if:` and the real rollup step, so a gate that reads the wrong output, an output classify does not export, or a classify that never carries a `false` all change the set, and the rollup must pass the run that results. |
+| `chain: a docs-only PR skips every gated job, mutation-roster included, and the rollup passes as doc-only (base#1584, base#2110)` | cycle 2. A docs-only PR skips every gated job (twelve: the eleven keys, with select_config_gen gating both config-gen jobs), mutation-roster and the arm64 image among them (base#2110), runs the documentation checks, and the rollup passes and says so. |
 | `chain: a workflow, driver or unknown-path PR skips no gated job (base#1584)` | cycle 3, issue criterion 1: a workflow change, a driver change and an unknown path each skip no gated job. |
-| `chain: the gated jobs, the map's job list and classify's loop are one set, and each selected skip fails the rollup (base#1584)` | cycle 4. One source for every gate: the nine names of design r7, the map's --jobs, classify's loop list and the keys the gated jobs' `if:`s read are the same set. Each gated job reads exactly one select_* key, the one its `if:` names; config-gen-gates and config-gen-redpath both read select_config_gen (base#1547 split one job into two, addendum point 2). The rollup must resolve each gated job to that same key: its skip fails while the key is `true` and passes once that key alone is `false`. The key comes from the job's `if:`, never from a rewrite of the job's name, so a rollup that guesses the key from the name fails here. |
+| `chain: the gated jobs, the map's job list and classify's loop are one set, and each selected skip fails the rollup (base#1584)` | cycle 4. One source for every gate: the map's names, the map's --jobs, classify's loop list and the keys the gated jobs' `if:`s read are the same set. Each gated job reads exactly one select_* key, the one its `if:` names; config-gen-gates and config-gen-redpath both read select_config_gen (base#1547 split one job into two, addendum point 2). The rollup must resolve each gated job to that same key: its skip fails while the key is `true` and passes once that key alone is `false`. The key comes from the job's `if:`, never from a rewrite of the job's name, so a rollup that guesses the key from the name fails here. |
 
 ### test/bats/unit/code_lines_spec.bats (46)
 
@@ -3177,7 +3186,7 @@ to escape.
 | `_sync_doc_counts: a second run over a generated catalogue changes nothing` | "Regenerating from scratch reproduces what is committed" is the gate check_test_md_drift.sh applies to the real tree, so a second run that moved a byte would make every branch red for a reason no diff explains. |
 | `_sync_doc_counts: a shipped smoke spec lands in smoke.md` | A shipped smoke spec is the one level whose glob leaves test/ for dist/, and it was the case that caught the doc-to-glob map going stale before. It stays because the map is still hand-written. |
 
-### test/bats/unit/dockerfile_migrate_spec.bats (177)
+### test/bats/unit/dockerfile_migrate_spec.bats (191)
 
 Unit tests for the declarative Dockerfile-migration list
 `lib/dockerfile_migrate.sh` (#567, folds #579 facet B). The lib exposes a
@@ -3246,6 +3255,12 @@ force-rewrite).
 | `migration (smoke-copy): a .base/test/smoke-prefixed sibling path is not the retired tree (#928)` | - |
 | `migration (smoke-copy): rewrites .base/test/smoke but leaves an xbase/test/smoke COPY alone (base#1324)` | A dot in the retired prefix matches only a dot |
 | `migration (smoke-copy): the rewrite prints no awk escape-sequence warning (base#1324)` | An upgrade prints no awk escape-sequence warning |
+| `migration (smoke-copy): a hand-listed COPY is rewritten the same under every awk (base#2138)` | base#2138 -- under mawk every shipped spec read as shipped at two paths, so a hand-listed COPY was left naming the deleted tree, the upgrade exited 0 and the consumer's next build failed. The input is the issue's. The two refusals are the control: they must stay refusals. |
+| `apply_migrations writes the same files and messages under every awk (base#2138)` | base#2138's inventory, kept as a test. Each awk program in the migration list runs under every engine over one old-layout repo; the files and the messages must be the same whichever awk the host has. |
+| `apply_migrations: a migration that changes nothing reports no patch (base#2138)` | base#2138 -- the line said a Dockerfile was patched when no byte had changed, so the one report of a failed rewrite read as a success. The warning that names the problem stays. |
+| `apply_migrations: an earlier migration's rewrite is not a later one's patch (base#2138)` | base#2138 -- the notice of one migration's rewrite is used up by it. Left pending, it would stand for a later migration that changed nothing. |
+| `apply_migrations: a run does not inherit a pending patch notice (base#2138)` | a run starts with no notice pending, whatever an earlier write in the same shell left behind. |
+| `apply_migrations: a file that changed is reported as patched, and only that file (base#2138)` | the other direction of the case above: a rewrite is still reported, once, and an entrypoint rewrite does not stand in for a Dockerfile one. |
 | `migration (repo-smoke-copy): rewrites the flat COPY into shared + the stage's own folder (#1044)` | Wholesale rewrite: shared baseline plus the enclosing stage folder |
 | `migration (repo-smoke-copy): emits only the shared baseline when the repo ships no stage folder (#1044)` | A stage the repo has no folder for gets no COPY of its own |
 | `migration (repo-smoke-copy): leaves base's own shipped path to smoke-copy (#1044)` | The two smoke migrations stay disjoint over one Dockerfile |
@@ -3274,7 +3289,10 @@ force-rewrite).
 | `apply_migrations heals the runtime COPYs every real consumer actually carries (#971)` | - |
 | `migration 5 (hadolint): DL3007 pins bats/alpine :latest tags (#567)` | - |
 | `migration 5 (hadolint): DL3046 adds useradd -l (#567)` | - |
-| `migration 5 (hadolint): DL3003 cd /lint -> WORKDIR /lint + RUN (#567)` | - |
+| `migration 5 (hadolint): DL3003 answers RUN cd /lint without moving the stage (base#2150)` | base#2150 -- the rewrite to `WORKDIR /lint` moved every later instruction of the stage, and the image's own working directory, into /lint: `RUN cd` ends with its line and WORKDIR does not. The line has to keep running what it ran, so it is kept and the rule is answered beside it. hadolint also looks for .hadolint.yaml in its working directory, so the `cd` cannot be dropped for a path either. |
+| `migration 5 (hadolint): DL3003 extends an existing pragma and settles (base#2150)` | the migration pass runs on every upgrade, and a pragma binds to the next line only, so one that is already there is extended, not displaced. |
+| `migration 5 (hadolint): DL3003 reads a pragma the way hadolint does (base#2150)` | hadolint allows spaces around every part of a pragma, and one it cannot parse ignores nothing. Prose that mentions a pragma is not one. |
+| `migration 5 (hadolint): WORKDIR /lint + RUN hadolint is left alone (base#2150)` | a Dockerfile already in the template's shape is the consumer's own and stays as it is. |
 | `migration 5 (hadolint): DL3042 adds pip --no-cache-dir (#567)` | - |
 | `migration 5 (hadolint): DL4006 adds SHELL pipefail to alpine lint-tools (#567)` | - |
 | `migration 5 (hadolint): DL3006 inline ignore before parameterized FROM (#567)` | - |
@@ -3324,6 +3342,11 @@ force-rewrite).
 | `migration 8 (nounset-source): brackets the ROS source with set +u/-u (#579)` | - |
 | `migration 8 (nounset-source): the rewritten entrypoint keeps its exact mode under umask 077 (base#1323)` | _dfm_install lands the awk output with mv, so the rewritten file would carry the mktemp's 0600 instead of the original's mode -- a committed entrypoint must keep exactly its mode, executable or not. Several modes under a restrictive umask (077) so a hardcoded 0755 or a umask-derived mode cannot pass (base#1323). |
 | `migration 8 (nounset-source): idempotent — already-guarded source untouched (#579)` | - |
+| `migration 8 (nounset-source): one bracket around several sources is left alone (base#2149)` | base#2149 -- ros1_bridge's shape. The `set -u` written between the sources turned nounset back on inside the repo's own bracket, and the container died in the file sourced after it. |
+| `migration 8 (nounset-source): only the bare source of a mixed file is bracketed (base#2149)` | base#2149 -- apply skipped a guard whose source carries a shellcheck directive, so it bracketed the guarded source a second time. |
+| `migration 8 (nounset-source): every spelling of a bracket is read as one (base#2149)` | base#2149 -- a bracket is whatever turns nounset off, not the one spelling on the line above. Each body is guarded as written. |
+| `migration 8 (nounset-source): a source after the bracket ends is still bracketed (base#2149)` | the direction that must not be lost. A bracket ends at its `set -u`, and a source after it is bare whatever was guarded above. |
+| `migration 8 (nounset-source): a function written before nounset is turned on is still bracketed (base#2149)` | where a function body stands in the file says nothing about when it runs. One written above the `set -u` is called below it. |
 | `migration 8 (nounset-source): detect false when no set -u in entrypoint (#579)` | - |
 | `migration 8 (nounset-source): fires under the orchestrator when the bringup sets nothing (#945)` | The gap the branch's own README migration opens. Keying the guard on an in-file `set -u` covers nothing here -- the bringup seeded before this release has no `set` line at all, and the orchestrator imposes nounset from outside it. This is the FAILS-at-HEAD case; without it the migration stays silent on exactly the path base tells people to take |
 | `migration 8 (nounset-source): brackets that bringup's source, directive and all (#945)` | Detecting is half of it; the write has to be correct for a file that never set nounset itself. The trailing `set -u` must RESTORE the mode the orchestrator was already in, which is checked by re-running detect on the rewritten file rather than by eyeballing the diff |
@@ -5145,7 +5168,7 @@ directory is a no-op).
 | `_run_lint_tools: the lint phase reaches the moving-tag driver and fails on an added test-tools:latest (base#1647)` | A driver nothing calls passes every test above and gates nothing: `just test lint`, the lint-static CI groups and the host --<tool>-only arm all go through test.sh's _LINT_TOOLS table and its dispatch case. The scratch tree carries a copy of test.sh and what it sources, so its REPO_ROOT is the scratch tree and the phase scans the fixture, not the live checkout. |
 | `test.sh --moving-tag-only: runs the moving-tag driver on the host and fails on an added test-tools:latest (base#1647)` | The host arm is the other entry point the help text and CI's dedicated-job check name; it must run the same driver. main is what `bash test.sh --moving-tag-only` runs once the source guard passes. |
 
-### test/bats/unit/multi_distro_build_worker_yaml_spec.bats (17)
+### test/bats/unit/multi_distro_build_worker_yaml_spec.bats (23)
 
 Structural assertions for `.github/workflows/multi-distro-build-worker.yaml`
 (#325 B-1 dispatcher, extended to N-D matrix-mode via #344 in v0.32.0). The
@@ -5155,11 +5178,11 @@ dispatcher fans a per-event `include`-shape matrix across
 copy-pasting a `${{ github.event_name == 'pull_request' && ... || ... }}`
 expression. Three jobs:
 
-1. **`resolve-matrix`** — pure-shell selector emitting a `matrix` JSON-array
-output (`include`-shape, each entry has `name` + `build_args` plus arbitrary
-additional fields). `pull_request` -> `pr_matrix` (subset); anything else
-(tag push, main push, `workflow_dispatch`) -> `tag_matrix` (release
-validation matrix).
+1. **`resolve-matrix`** — shell and jq selector emitting a `matrix`
+JSON-array output (`include`-shape, each entry has `name` + `build_args`
+plus arbitrary additional fields). `pull_request` -> `pr_matrix` (subset);
+anything else (tag push, main push, `workflow_dispatch`) -> `tag_matrix`
+(release validation matrix).
 
 2. **`call-build`** — strategy.matrix job invoking the local
 `build-worker.yaml` per matrix cell. Derives per-shard `image_name` as
@@ -5233,6 +5256,12 @@ builds nothing and pushes nothing)
 | `multi-distro-build-worker.yaml: passthrough inputs mirror build-worker (build_runtime / platforms / context_path / dockerfile_path / build_contexts) (closes #1122)` | - |
 | `multi-distro-build-worker.yaml: resolve-matrix job emits matrix output (#344 include-shape)` | - |
 | `multi-distro-build-worker.yaml: resolve-matrix branches on github.event_name == pull_request (#344)` | - |
+| `multi-distro-build-worker.yaml: a multi-line tag_matrix reaches fromJSON on push and workflow_dispatch (base#2160)` | base#2160. app/ros1_bridge writes tag_matrix as a block scalar, and the runner refused the multi-line `matrix=` line with "Invalid format ']'", so every push to main and every release failed while pull requests passed. |
+| `multi-distro-build-worker.yaml: a multi-line pr_matrix reaches fromJSON on pull_request (base#2160)` | base#2160. The same write on the other branch of the event check. |
+| `multi-distro-build-worker.yaml: a single-line matrix reaches fromJSON, from the input the event selects (base#2160)` | base#2160. The single-line spelling worked before and must keep its value, and each event must still pick its own input. |
+| `multi-distro-build-worker.yaml: an entry's own characters survive the hand-over (base#2160)` | base#2160. A fix that joins or rewrites the lines as text can damage a value: an escaped newline in build_args, spaces, and the characters the GITHUB_OUTPUT format itself uses. |
+| `multi-distro-build-worker.yaml: an input that is not one JSON array is refused by name (base#2160)` | base#2160. An unreadable matrix must fail in this job, naming the input the caller wrote, and not as an empty matrix in call-build. A second JSON document and a non-array are refused for the same reason: `include:` takes one array. |
+| `multi-distro-build-worker.yaml: the input the event does not select is not judged (base#2160)` | base#2160. The event selects one input; what the other holds must not fail a run that never uses it. |
 | `multi-distro-build-worker.yaml: call-build uses local build-worker via ./.github/workflows/build-worker.yaml (#325 B-1)` | - |
 | `multi-distro-build-worker.yaml: call-build matrix is include: fromJSON(needs.resolve-matrix.outputs.matrix) (#344 N-D)` | - |
 | `multi-distro-build-worker.yaml: call-build derives per-shard image_name as <image_name>-<matrix.name> (hyphen, #344)` | - |
@@ -5513,7 +5542,7 @@ list of job names.
 | `obtain: --artifact without TEST_TOOLS_ARTIFACT_TAG is a usage error, never loaded (base#1588)` | base#1588. The loaded image is found by the run-scoped tag the builder gave it, TEST_TOOLS_ARTIFACT_TAG. A caller that passes an artifact without that tag would re-tag an empty name, so it is a usage error, refused before the tar is touched. |
 | `workflows: no job obtains the rolling test-tools tag by hand (#1010)` | The structural half of the same defect, and the half that stops it recurring. While the decision was shell pasted into each consuming job, nothing could tell a job that probes from a job that does not -- no single copy looked wrong, and the one without a probe read like the others. A job that reaches the rolling tag without going through the script is that copy, whoever writes it next. |
 
-### test/bats/unit/org_name_spec.bats (3)
+### test/bats/unit/org_name_spec.bats (5)
 
 The org was renamed and the old names no longer resolve, so a retired org
 name anywhere in the shipped or tested tree is a clone, an action call or an
@@ -5525,6 +5554,8 @@ cache output a run leaves behind.
 |------|-------------|
 | `org name: only doc/adr and doc/changelog are named adr or changelog (base#2106)` | The exemption is the historical record and nothing else -- an exclusion that also matched a live directory named the same would hide exactly what this spec looks for. |
 | `org name: the scan reports a retired name it is shown (base#2106)` | The scan itself must be able to find a hit, or a green result says nothing: a fixture tree carrying one retired name has to be reported with its path. |
+| `org name: the scan passes over ignored editor and agent state (base#2119)` | A checkout can hold untracked editor and agent state, whole stale worktrees under .claude included; reporting a name found there fails a local run over files that are not in the tree (base#2119) |
+| `org name: every excluded run or editor directory is one .gitignore lists (base#2119)` | A directory may be passed over because git ignores it and for no other reason; an excluded name .gitignore does not list could be a tracked directory, and the scan would silently stop covering it (base#2119) |
 | `org name: the tree outside the historical record names no retired org (base#2106)` | The live tree names only the current org: no file outside the historical record carries a retired one. |
 
 ### test/bats/unit/per_test_timeout_spec.bats (8)
@@ -5993,7 +6024,7 @@ fallback is present.
 | `prune.sh --help mentions --worktree-orphans (#388)` | - |
 | `prune.sh aborts on a failing pre-prune hook and skips docker prune (#690)` | - |
 
-### test/bats/unit/publish_worker_yaml_spec.bats (38)
+### test/bats/unit/publish_worker_yaml_spec.bats (40)
 
 Structural assertions for the `.github/workflows/publish-worker.yaml`
 reusable `call-publish` workflow (foundational image repos push their
@@ -6039,6 +6070,8 @@ acquiring it, and to any other scope beside it
 | `publish-worker.yaml: build shards push per-platform BY DIGEST (#602)` | - |
 | `publish-worker.yaml: shards do NOT push the same tag per shard (#602 regression guard)` | - |
 | `publish-worker.yaml: each shard exports + uploads its digest as an artifact (#602)` | - |
+| `publish-worker.yaml: no two variants of one run share or reach each other's digest artifacts (base#2130)` | Artifacts belong to the workflow RUN, not to one call of a reusable workflow, and the caller this worker is written for calls it once per variant from a matrix. A name two variants share fails the second upload, and a download that reaches another variant's digests assembles that variant's image under this one's tag (base#2130) |
+| `publish-worker.yaml: the artifact key is an output of compute-matrix read from its step (base#2130)` | The key has to reach both jobs as an output of the job that computes it; an output that names no step expands to nothing, and every variant is back to one shared name (base#2130) |
 | `publish-worker.yaml: merge job assembles the multi-arch manifest via imagetools (#602)` | - |
 | `publish-worker.yaml: merge resolves tags from inputs (version + optional latest) once (#602)` | - |
 | `publish-worker.yaml: merge login uses the parameterised registry (not hardcoded ghcr.io)` | - |
@@ -6937,7 +6970,7 @@ alias / `network.network_name` / `devices.device_` / `security.cap_add_` /
 | `self-hosted guard: FAILS when the workflows parse to zero jobs` | - |
 | `self-hosted guard: scans every workflow in the directory, not a named list` | - |
 
-### test/bats/unit/self_test_yaml_spec.bats (162)
+### test/bats/unit/self_test_yaml_spec.bats (164)
 
 Structural assertions for `.github/workflows/self-test.yaml`. Locks fourteen
 cumulative invariants:
@@ -7280,6 +7313,7 @@ rolling tag itself (#697, #1010)
 | `self-test.yaml: acceptance shards run on the matrix runner (#603)` | - |
 | `self-test.yaml: acceptance Obtain step pulls the matrix platform, not a hardcoded amd64 (#603)` | - |
 | `self-test.yaml: system job declares needs on actionlint AND classify (#317)` | - |
+| `self-test.yaml: no unquoted name: is cut short by a # (base#2121)` | In an unquoted YAML value a blank followed by `#` starts a comment, so a name carrying an issue number is cut off there and the check list shows half of it (base#2121) |
 | `self-test.yaml: bats-fragile job-level if: gates on classify's select_bats_fragile (#677, base#1584)` | - |
 | `self-test.yaml: no monolithic 'test:' job remains after #377 split` | - |
 | `self-test.yaml: acceptance job-level if: gates on classify's select_acceptance (#317, base#1584)` | #317 gated acceptance on code_changed. base#1584 narrows it to classify's map: the consumer gets the whole checkout (script/ci/acceptance.sh:90), so only docs and `*_spec.bats` leaves drop it, and a spec-only PR no longer pays for both arch legs. |
@@ -7320,7 +7354,7 @@ rolling tag itself (#697, #1010)
 | `self-test.yaml: ci-rollup verify step consumes every needs result incl coverage (#337 + #376 + #377 + #615)` | A need the verify step never reads is waited on and then ignored: its failure turns nothing red. |
 | `self-test.yaml: ci-rollup needs every conditionally-gated job (#337 + #377)` | The gated jobs skip on doc-only PRs by design; without skip tolerance those PRs could never merge. Since base#1584 the tolerance is the rollup's skip table, and it is proven by running the lifted step, not by matching its text: workflow_failure_surface_spec.bats skips every gated job ci-rollup needs, in turn, with the classify answer its own `if:` reads set `false` (must pass) and set `true` (must fail), and runs a doc-only run with every gated job skipped (#1014, must pass). This case keeps only the membership half: every gated job is one ci-rollup needs, so none of them can drop out of the required check unseen. |
 | `self-test.yaml: ci-rollup requires hard-mandatory jobs to be success (#337 + #377)` | The ungated jobs never skip on purpose, so a SKIPPED there is a workflow bug the strict loop must not collapse into a pass. |
-| `self-test.yaml: the test-tools-image builders always run and their skip fails ci-rollup (base#1588, base#1584)` | The two test-tools-image builders (base#1588) feed doc-counts, lint-static and mutation-roster, which carry no `if:`, so the builders must run on every event too -- merge_group included (base#1587). The rollup's job-to-key map (base#1584) excuses a skip only for a job it names, so the decision is explicit: the builders carry no job-level `if:` and the map does not name them, which makes their skip fail. |
+| `self-test.yaml: the amd64 test-tools-image builder always runs, the arm64 one skips only on its own key (base#1588, base#2110)` | The amd64 test-tools-image builder (base#1588) feeds doc-counts and lint-static, which carry no `if:`, so it must run on every event too -- merge_group included (base#1587) -- and its skip must fail the rollup even beside a select_* key its name could be rewritten to. The arm64 builder feeds only acceptance, so a docs-only pull request skips it on its own key (base#2110). |
 | `self-test.yaml: ci-rollup treats compute-shards as hard-mandatory, not SKIPPED-tolerant (#1009)` | compute-shards carries no `if:` gate, so a SKIPPED there is a workflow bug and not a conditional job declining to run. It is also the one job whose FAILURE is otherwise invisible: coverage needs it and coverage-gate needs coverage, and both of those sit in the rollup's skipped-tolerant bucket, so putting compute-shards in the tolerant bucket too leaves the required check green with the entire unit suite and the coverage floor never run. |
 | `self-test.yaml: every job the workflow declares is named directly in ci-rollup's needs (#1009)` | This is the guard that makes the merge gate's roster DERIVED rather than hand-kept, and it is the recurrence #1009 asks to close: adding a job to the workflow used to update neither ci-rollup's needs nor any assertion, so the new job gated nothing and every existing test stayed green. Directly and not transitively, because ci-rollup runs under `if: always()` and reads each upstream's `.result`: GitHub reports a job whose need failed as SKIPPED, and SKIPPED is pass-equivalent in the tolerant bucket, so a job reached only through another is invisible to it. |
 | `self-test.yaml: ci-rollup inspects every job it needs (#1009)` | Joining `needs:` is only half a gate, so the guard above is not enough on its own. A job that is needed but whose result the verify step never reads is waited for and then ignored, which is the same green as never having been needed, with a needs list that reads as correct. Since base#1584 the step walks every key of ${{ toJSON(needs) }}, so the proof is behavioural: every need's failure, cancel and unexcused skip fails the step, and an all-success run passes. |
@@ -7350,6 +7384,7 @@ rolling tag itself (#697, #1010)
 | `self-test.yaml: declares doc-counts job (#864)` | - |
 | `self-test.yaml: doc-counts job runs test.sh --lint --doc-counts inside the test-tools image (#864, base#1412)` | - |
 | `self-test.yaml: doc-counts carries NO code_changed gate (#864)` | - |
+| `self-test.yaml: the jobs a docs-only pull request runs start no bats (base#2110)` | base#2110. A docs-only pull request runs the jobs that carry no classify gate, and none of them may run bats, coverage or a mutation row: those run in the merge queue, where classify selects every job. What such a job calls of the test driver is a lint. |
 | `self-test.yaml: ci-rollup treats doc-counts as hard-mandatory, not SKIPPED-tolerant (#864)` | - |
 | `self-test.yaml: declares lint-static job (#866)` | - |
 | `self-test.yaml: lint-static carries NO code_changed gate (#866)` | - |
@@ -8681,7 +8716,7 @@ Unit tests for the repo-local command-group scaffolder
 | `new.sh registers a real mod? line even when the seed registry only COMMENTS that name (#785)` | - |
 | `new.sh source ships with the executable bit set (recipe invokes it directly) (#785)` | - |
 
-### test/bats/unit/template_spec.bats (171)
+### test/bats/unit/template_spec.bats (175)
 
 | Test | Description |
 |------|-------------|
@@ -8799,6 +8834,10 @@ Unit tests for the repo-local command-group scaffolder
 | `upgrade.sh rewrites the @ref of every reusable worker base ships (#1112)` | The rewrite's population has to be the workers base ships, not a roster the sed names -- a named roster cannot see the worker it omits (#1112) |
 | `upgrade.sh main.yaml rewrite moves retired-org worker refs to the current org at the new tag (base#2106)` | The org was renamed and the retired org's names no longer resolve, so a worker ref still under the retired org moves to the current org at the new tag, whichever worker it names -- publish-worker included -- and a ref already under the current org is bumped the same way (base#2106) |
 | `upgrade.sh main.yaml rewrite leaves a third party's worker ref alone (#1112)` | Name-independent must not become owner-independent -- the rewrite rewrites OUR refs, and a stranger's worker is not ours to bump (#1112) |
+| `upgrade.sh main.yaml rewrite leaves an owner that only ends in the slug alone (base#2118)` | An owner whose name merely ENDS in the slug is a stranger, and the rewrite of a retired ref replaces part of that name, so without a left boundary it turns the stranger's owner into one that does not exist (base#2118) |
+| `upgrade.sh main.yaml rewrite acts on inline uses: values only (base#2118)` | Only the value of a `uses:` is a ref an upgrade owns: a note that records which ref a repo came from is the repo's own history, and rewriting it makes the note false. A ref that is quoted, inline or commented out is still a `uses:` and still moves (base#2118) |
+| `upgrade.sh main.yaml rewrite reaches each inline spelling under both slugs (base#2118)` | Each of these is a ref the rewrite used to reach, under both the retired and the current slug; losing one leaves a consumer's job pinned to an org that no longer resolves, or to the old release (base#2118) |
+| `upgrade.sh main.yaml rewrite leaves a key that only ends in uses alone (base#2118)` | The line that bumps the ref needs the left boundary as much as the one that moves the org: a key merely ending in `uses` is not a `uses`, whichever slug it carries (base#2118) |
 | `build-worker.yaml: no legacy in-job test-tools build step` | v0.9.13 GHCR migration |
 | `build-worker.yaml: derives the tooling image from the version-matched checkout (closes #1122)` | the tooling image is derived from the version-matched checkout, not taken as an input (closes #1122) |
 | `build-worker.yaml: does not resurrect the GITHUB_WORKFLOW_REF parse step` | regression guard |
@@ -10638,7 +10677,7 @@ than by the caller who follows it.
 | `release-worker.yaml: preflight runs preflight.sh with the release manifest (#800)` | - |
 | `release-worker.yaml: preflight exports archive_name_prefix into the manifest env var (#800)` | - |
 
-### test/bats/unit/workflow_failure_surface_spec.bats (20)
+### test/bats/unit/workflow_failure_surface_spec.bats (21)
 
 Five properties of the workflow tree, four of them about what a reader
 learns from a failed run and the fifth about what the tree itself records. A
@@ -10676,7 +10715,8 @@ before reading an empty result as a clean one.
 | `self-test: the rollup passes a gated skip only when its own select key is false (base#1584)` | every gated job ci-rollup needs, in turn: its skip passes with its own select_* key `false` and fails with it `true`. The job set is read from `needs` and each job's `if:`, not from the rollup's text, and the key is the one the job's `if:` reads, never a rewrite of the job's name: config-gen-gates and config-gen-redpath both read select_config_gen (base#1547 split one job into two), and a rollup that guessed select_config_gen_gates from the name failed both decided skips. |
 | `self-test: the rollup fails the skip of a job its key map does not name, even when its name matches a key (base#1584)` | addendum point 2 (base#1547 split config-gen in two). The rollup finds a job's select_* key through an explicit job-to-key map; a job missing from the map has no excuse, so its skip fails even with every key `false`. The probe is a needs entry named `config-gen`: no such job gates on anything now, but its name rewritten (select_config_gen) is a real key, so a rollup that derives the key from the name excuses it. |
 | `self-test: the rollup fails every needed job's failure or cancel, whatever classify said (base#1584)` | cycle 7 (R1-F1). A skipped-only walk would pass a failure; every job ci-rollup needs fails it as `failure` and as `cancelled`, even with every select_* key `false`, the most permissive classify. |
-| `self-test: the rollup fails a compute-shards or mutation-roster skip (base#1584)` | cycle 8. compute-shards and mutation-roster carry no `if:` and no select_* key; on main both sit in the hard-mandatory success-only loop (`git show origin/main:.github/workflows/self-test.yaml`). A skip of either fails, even with every key `false`. |
+| `self-test: the rollup fails a compute-shards or amd64 image builder skip (base#1584, base#2110)` | cycle 8. compute-shards and the amd64 image builder carry no `if:` and no select_* key. A skip of either fails, even with every key `false`. |
+| `self-test: the rollup excuses a mutation-roster or arm64 image skip only when its own key is false (base#2110)` | base#2110. The rollup must tell a docs-only skip from one that should have run: mutation-roster and the arm64 image builder pass skipped only while their own key is `false`. The same skip beside a `true`, empty or missing key fails, whatever the other keys say. |
 | `self-test: the rollup fails a skip when classify failed or its key is missing (base#1584)` | cycle 9. A failed classify leaves every output empty, so no skip is a decision; a key missing from the needs context is none either. |
 | `self-test: the rollup fails when the needs context is empty or unreadable (base#1584)` | no readable needs context is no evidence anything ran. |
 | `workflows: every workflow a trigger can start declares a concurrency group (#1014)` | Nothing in the tree orders anything. Every push to a PR branch starts a fresh eight-shard coverage matrix beside the one still running, and two main merges touching the test-tools Dockerfile run two unserialised publishes whose last writer is decided by arm64 queue time rather than by commit order -- which is how a rolling tag ends up pointing at the older build. |

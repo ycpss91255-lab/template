@@ -123,8 +123,9 @@ _classify_pr() {
   : > "${BATS_TEST_TMPDIR}/out"
   (
     cd "${_d}" || return 2
-    env EVENT_NAME=pull_request BASE_REF=main GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/out" \
-        bash "${BATS_TEST_TMPDIR}/step.sh"
+    env EVENT_NAME=pull_request BASE_REF=main IS_FORK_PR="${CLASSIFY_IS_FORK-false}" \
+        DEFAULT_BRANCH="${CLASSIFY_DEFAULT_BRANCH-main}" \
+        GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/out" bash "${BATS_TEST_TMPDIR}/step.sh"
   ) >/dev/null 2>"${BATS_TEST_TMPDIR}/step.err"
   cat "${BATS_TEST_TMPDIR}/out"
 }
@@ -258,14 +259,15 @@ _context_copy_paths() {
   assert_line 'testtools_changed=true'
 }
 
-# The nine select_* keys classify writes (design r7 sec. 2). Each
+# The eleven select_* keys classify writes (nine from design r7 sec. 2, two
+# from base#2110). Each
 # self-test.yaml job whose `if:` reads classify reads one of them, and
 # select_config_gen gates both config-gen jobs (base#1547 split one job
-# in two), so ten jobs read these nine keys (cycle 4 below).
-SELECT_KEYS="select_config_gen select_coverage select_coverage_gate select_acceptance select_system select_worker_selftest select_shellcheck select_hadolint select_bats_fragile"
+# in two), so twelve jobs read these eleven keys (cycle 4 below).
+SELECT_KEYS="select_config_gen select_coverage select_coverage_gate select_acceptance select_system select_worker_selftest select_shellcheck select_hadolint select_bats_fragile select_mutation_roster select_test_tools_image_arm64"
 
 # _assert_keys <output> <value> [<key>...] -- every select_* key named (all
-# nine when none is) is exactly <value> in <output>.
+# of them when none is) is exactly <value> in <output>.
 _assert_keys() {
   local _out="$1" _v="$2" _k _bad=""
   shift 2
@@ -277,7 +279,7 @@ _assert_keys() {
 }
 
 # why: cycle 6. Main runs the full suite (owner decision, base#1584), so
-# the push arm writes all nine select_* keys `true`.
+# the push arm writes every select_* key `true`.
 @test "classify: a push writes every gated job's selection as true (base#1584)" {
   run _classify_push doc/guide.md
   assert_success
@@ -286,7 +288,7 @@ _assert_keys() {
 
 # why: a merge group is the last run before main (base#1587), and only a
 # pull request narrows the selection (base#1584). So a merge_group run
-# writes all nine select_* keys `true` even when its diff is docs only,
+# writes every select_* key `true` even when its diff is docs only,
 # or the queue would land a commit whose gated jobs never ran.
 @test "classify: a merge_group run writes every gated job's selection as true (base#1584, base#1587)" {
   run _classify_event merge_group doc/guide.md
@@ -294,16 +296,17 @@ _assert_keys() {
   _assert_keys "${output}" true
 }
 
-# why: cycle 6. mutation-roster keeps main's form: no `if:` (roster row
-# selection belongs to base#1604), and the workflow's job list is main's
+# why: cycle 6. A docs-only pull request cannot change a roster row's
+# verdict, so mutation-roster is gated on its own key (base#2110; choosing
+# rows from a diff belongs to base#1604). The workflow's job list is main's
 # (`git show origin/main:.github/workflows/self-test.yaml`, re-measured in
 # redesign r6). base#1588 adds the two ungated test-tools-image builders
 # after classify; base#1629 adds the ungated single-issue-pr before
 # mutation-roster. base#1989 adds the ungated commit-attribution job
 # before ci-rollup.
-@test "self-test.yaml: mutation-roster has no if: and the job list is main's (base#1584)" {
-  run yq '.jobs."mutation-roster" | has("if")' "${SELF_WF}"
-  assert_output false
+@test "self-test.yaml: mutation-roster is gated on its own key and the job list is main's (base#1584, base#2110)" {
+  run yq '.jobs."mutation-roster".if' "${SELF_WF}"
+  assert_output "needs.classify.outputs.select_mutation_roster == 'true'"
   run yaml_job_names "${SELF_WF}"
   assert_output "actionlint
 classify
@@ -366,7 +369,71 @@ release"
   assert_line 'select_worker_selftest=false'
   assert_line 'select_coverage=true'
   _assert_keys "${output}" true select_coverage_gate select_shellcheck \
-      select_hadolint select_bats_fragile
+      select_hadolint select_bats_fragile select_mutation_roster \
+      select_test_tools_image_arm64
+}
+
+# why: base#2110. A fork's pull request is never narrowed: classify answers
+# `true` for every key, and so does a run that cannot say whether it is a
+# fork.
+@test "classify: a fork pull request, or one not known to be same-repo, selects every gated job (base#2110)" {
+  local _v
+  for _v in true ''; do
+    CLASSIFY_IS_FORK="${_v}" run _classify_pr doc/x.md
+    assert_success
+    _assert_keys "${output}" true
+  done
+  run yq '.jobs.classify.steps[] | select(.id == "diff") | .env.IS_FORK_PR' "${SELF_WF}"
+  assert_output "\${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}"
+}
+
+# why: base#2110. A pull request into any other branch can be retargeted at
+# the default branch without a new run, so its diff against the other branch
+# would stand for the one that merges. Only a pull request into the default
+# branch is narrowed, and not knowing is not being one. A branch whose name
+# differs only in case is another branch (GitHub's own == ignores case).
+@test "classify: a pull request not known to target the default branch selects every gated job (base#2110)" {
+  local _v
+  for _v in other Main ''; do
+    CLASSIFY_DEFAULT_BRANCH="${_v}" run _classify_pr doc/x.md
+    assert_success
+    _assert_keys "${output}" true
+  done
+  run yq '.jobs.classify.steps[] | select(.id == "diff") | .env.DEFAULT_BRANCH' "${SELF_WF}"
+  assert_output "\${{ github.event.repository.default_branch }}"
+}
+
+# _pr_shadows_base_with_a_tag -- the PR side changes code, and a tag named
+# like the base's remote branch points at that code.
+_pr_shadows_base_with_a_tag() {
+  printf 'x\n' > zz-code.sh
+  git add zz-code.sh
+  git commit -q -m code
+  git tag origin/main
+}
+
+# why: base#2110. `origin/main` as a bare name resolves to a tag of that name
+# before the remote branch, so a pushed tag could stand in for the base. The
+# step names the remote branch in full.
+@test "classify: a tag named like the base branch does not stand in for it (base#2110)" {
+  CLASSIFY_PR_HOOK=_pr_shadows_base_with_a_tag run _classify_pr doc/x.md
+  assert_success
+  _assert_keys "${output}" true
+}
+
+# _pr_edits_selection_at_base -- the PR side's selection_at_base.sh answers
+# `false` for every job.
+_pr_edits_selection_at_base() {
+  printf '%s\n' 'for j in $(bash script/ci/check_selection.sh --jobs); do echo "$j=false"; done' \
+    > script/ci/selection_at_base.sh
+}
+
+# why: base#2110. The script that runs the base side's map is read from the
+# base too: one read from the pull request could answer without the map.
+@test "classify: a pull request's own selection_at_base.sh does not judge it (base#2110)" {
+  CLASSIFY_PR_HOOK=_pr_edits_selection_at_base run _classify_pr doc/x.md
+  assert_success
+  _assert_keys "${output}" true
 }
 
 # _base_map_fails -- the base side's map exits 1.
@@ -395,7 +462,8 @@ _base_map_drops_acceptance() {
   assert_line 'select_acceptance=true'
   _assert_keys "${output}" false select_config_gen select_coverage \
       select_coverage_gate select_system select_worker_selftest \
-      select_shellcheck select_hadolint select_bats_fragile
+      select_shellcheck select_hadolint select_bats_fragile \
+      select_mutation_roster select_test_tools_image_arm64
 }
 
 # _pr_map_selects_nothing_for_row5 -- the PR side's map: row 5 (`*`)
@@ -487,7 +555,7 @@ _chain_classify_outputs() {
   while read -r _k _v; do
     [[ -n "${_k}" ]] || continue
     _into["${_k}"]=""
-    if [[ "${_v}" =~ ^\$\{\{\ steps\.diff\.outputs\.([a-z_]+)\ \}\}$ ]]; then
+    if [[ "${_v}" =~ ^\$\{\{\ steps\.diff\.outputs\.([a-z0-9_]+)\ \}\}$ ]]; then
       _into["${_k}"]="$(sed -n "s/^${BASH_REMATCH[1]}=//p" <<< "${_step_out}" | tail -n 1)"
     fi
   done < <(yq '.jobs.classify.outputs | to_entries[] | .key + " " + .value' "${SELF_WF}")
@@ -521,7 +589,7 @@ _chain_results() {
       _ok=1
     elif [[ -z "${_if}" ]]; then
       :
-    elif [[ "${_if}" =~ ^needs\.classify\.outputs\.([a-z_]+)\ ==\ \'true\'$ ]]; then
+    elif [[ "${_if}" =~ ^needs\.classify\.outputs\.([a-z0-9_]+)\ ==\ \'true\'$ ]]; then
       [[ "${_cls[${BASH_REMATCH[1]}]:-}" == "true" ]] || _ok=0
     elif [[ "${_if}" == "always()" ]]; then
       _ok=1
@@ -570,7 +638,7 @@ _chain_rollup() {
       _env+=("IS_FORK_PR=false")
     elif [[ "${_v}" =~ ^\$\{\{\ needs\.([a-z-]+)\.result\ \}\}$ ]]; then
       _env+=("${_k}=${_res[${BASH_REMATCH[1]}]:-}")
-    elif [[ "${_v}" =~ ^\$\{\{\ needs\.classify\.outputs\.([a-z_]+)\ \}\}$ ]]; then
+    elif [[ "${_v}" =~ ^\$\{\{\ needs\.classify\.outputs\.([a-z0-9_]+)\ \}\}$ ]]; then
       _env+=("${_k}=${_cls[${BASH_REMATCH[1]}]:-}")
     elif [[ "${_v}" =~ ^\$\{\{\ toJSON\(needs\)\ \}\}$ ]]; then
       _env+=("${_k}=${_json}")
@@ -613,9 +681,8 @@ _gated_jobs() {
 # cannot affect config-gen, acceptance, system or worker-selftest, so
 # those skip (config-gen is two jobs since base#1547, config-gen-gates
 # and config-gen-redpath, on one key); it is code, so shellcheck, hadolint, bats-fragile,
-# coverage and coverage-gate run; and mutation-roster keeps main's form,
-# no `if:` (roster row selection belongs to base#1604), so it runs on
-# every PR. Read through classify's real step, its `outputs:` map, every
+# coverage and coverage-gate run; and mutation-roster runs on every PR
+# that is not docs only (base#2110). Read through classify's real step, its `outputs:` map, every
 # job's parsed `if:` and the real rollup step, so a gate that reads the
 # wrong output, an output classify does not export, or a classify that
 # never carries a `false` all change the set, and the rollup must pass
@@ -635,12 +702,15 @@ _gated_jobs() {
   assert_success
 }
 
-# why: cycle 2. A docs-only PR skips every gated job (ten: the nine keys,
-# with select_config_gen gating both config-gen jobs), still runs
-# mutation-roster (no `if:`), and the rollup passes and says so.
-@test "chain: a docs-only PR skips every gated job, runs mutation-roster, and the rollup passes as doc-only (base#1584)" {
+# why: cycle 2. A docs-only PR skips every gated job (twelve: the eleven
+# keys, with select_config_gen gating both config-gen jobs),
+# mutation-roster and the arm64 image among them (base#2110), runs the
+# documentation checks, and the rollup passes and says so.
+@test "chain: a docs-only PR skips every gated job, mutation-roster included, and the rollup passes as doc-only (base#1584, base#2110)" {
   local _out _results _j
-  local -a _want=(mutation-roster=success)
+  local -a _want=(mutation-roster=skipped test-tools-image-arm64=skipped
+    doc-counts=success lint-static=success single-issue-pr=success
+    commit-attribution=success)
   _out="$(_classify_pr doc/x.md)"
   run _chain_results "${_out}"
   assert_success
@@ -648,7 +718,7 @@ _gated_jobs() {
   while IFS= read -r _j; do
     [[ -n "${_j}" ]] && _want+=("${_j}=skipped")
   done < <(_gated_jobs)
-  [[ "${#_want[@]}" -eq 11 ]] || fail "expected ten gated jobs, read $(( ${#_want[@]} - 1 ))"
+  [[ "${#_want[@]}" -eq 18 ]] || fail "expected twelve gated jobs, read $(( ${#_want[@]} - 6 ))"
   _chain_check "${_results}" "${_want[@]}"
   run _chain_rollup "${_out}" "${_results}"
   assert_success
@@ -672,7 +742,7 @@ _gated_jobs() {
   done
 }
 
-# why: cycle 4. One source for every gate: the nine names of design r7,
+# why: cycle 4. One source for every gate: the map's names,
 # the map's --jobs, classify's loop list and the keys the gated jobs'
 # `if:`s read are the same set. Each gated job reads exactly one
 # select_* key, the one its `if:` names; config-gen-gates and
@@ -683,33 +753,35 @@ _gated_jobs() {
 # from a rewrite of the job's name, so a rollup that guesses the key from
 # the name fails here.
 @test "chain: the gated jobs, the map's job list and classify's loop are one set, and each selected skip fails the rollup (base#1584)" {
-  local _gated _map _loop _nine _ten _keys _j _k _if
-  _nine="$(printf '%s\n' config-gen coverage coverage-gate acceptance system \
-      worker-selftest shellcheck hadolint bats-fragile | LC_ALL=C sort)"
-  _ten="$(printf '%s\n' config-gen-gates config-gen-redpath coverage coverage-gate \
-      acceptance system worker-selftest shellcheck hadolint bats-fragile | LC_ALL=C sort)"
+  local _gated _map _loop _names _jobs12 _keys _j _k _if
+  _names="$(printf '%s\n' config-gen coverage coverage-gate acceptance system \
+      worker-selftest shellcheck hadolint bats-fragile mutation-roster \
+      test-tools-image-arm64 | LC_ALL=C sort)"
+  _jobs12="$(printf '%s\n' config-gen-gates config-gen-redpath coverage coverage-gate \
+      acceptance system worker-selftest shellcheck hadolint bats-fragile mutation-roster \
+      test-tools-image-arm64 | LC_ALL=C sort)"
   _gated="$(_gated_jobs | LC_ALL=C sort)"
   _map="$(bash /source/script/ci/check_selection.sh --jobs | LC_ALL=C sort)"
   _loop="$(yaml_step_run "${SELF_WF}" classify diff \
       | awk '/for job in config-gen/ {f = 1} f {print} f && /; do$/ {exit}' \
       | sed -e 's/for job in//' -e 's/; do//' -e 's/\\$//' | tr -s ' \n' '\n' \
       | sed '/^$/d' | LC_ALL=C sort)"
-  assert_equal "${_gated}" "${_ten}"
-  assert_equal "${_map}" "${_nine}"
-  assert_equal "${_loop}" "${_nine}"
+  assert_equal "${_gated}" "${_jobs12}"
+  assert_equal "${_map}" "${_names}"
+  assert_equal "${_loop}" "${_names}"
   local _out _results _bad=""
   local -A _key=()
   while IFS= read -r _j; do
     _if="$(LP_J="${_j}" yq '.jobs[strenv(LP_J)].if' "${SELF_WF}")"
-    if [[ "${_if}" =~ ^needs\.classify\.outputs\.(select_[a-z_]+)\ ==\ \'true\'$ ]]; then
+    if [[ "${_if}" =~ ^needs\.classify\.outputs\.(select_[a-z0-9_]+)\ ==\ \'true\'$ ]]; then
       _key["${_j}"]="${BASH_REMATCH[1]}"
     else
       _bad+="${_j}: if: is '${_if}'"$'\n'
     fi
-  done <<< "${_ten}"
+  done <<< "${_jobs12}"
   [[ -z "${_bad}" ]] || fail "${_bad}"
   _keys="$(for _k in "${_key[@]}"; do _k="${_k#select_}"; echo "${_k//_/-}"; done | LC_ALL=C sort -u)"
-  assert_equal "${_keys}" "${_nine}"
+  assert_equal "${_keys}" "${_names}"
   assert_equal "${_key[config-gen-gates]}" select_config_gen
   assert_equal "${_key[config-gen-redpath]}" select_config_gen
   _out="$(_classify_pr zz-new/thing.txt)"
@@ -720,6 +792,6 @@ _gated_jobs() {
     [[ "${status}" -eq 1 ]] || _bad+="${_j}: a skip with ${_k}=true exited ${status}"$'\n'
     run _chain_rollup "${_out}"$'\n'"${_k}=false" "$(sed -E "s/^${_j} .*/${_j} skipped/" <<< "${_results}")"
     [[ "${status}" -eq 0 ]] || _bad+="${_j}: a skip with ${_k}=false exited ${status}"$'\n'
-  done <<< "${_ten}"
+  done <<< "${_jobs12}"
   [[ -z "${_bad}" ]] || fail "${_bad}"
 }

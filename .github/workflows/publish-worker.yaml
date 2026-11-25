@@ -145,6 +145,7 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
+      artifact_key: ${{ steps.key.outputs.key }}
     steps:
       - id: set
         env:
@@ -176,6 +177,28 @@ jobs:
           fi
           json="{\"include\":[${items%,}]}"
           echo "matrix=${json}" >> "${GITHUB_OUTPUT}"
+
+      # Artifacts belong to the workflow RUN, and a multi-variant caller
+      # calls this worker several times in one run (a matrix over its
+      # variants). So the digest artifacts are named by what tells two calls
+      # apart, the tag they publish to: under one shared name the second
+      # upload fails, and a merge that reached another variant's digests
+      # would assemble that image under this tag (base#2130).
+      #
+      # A digest of the three, not the three themselves: an artifact name
+      # cannot hold the `/` an image name may, and a suffix that is a prefix
+      # of another's (`-noetic`, `-noetic-ros-base`) would let one call's
+      # download pattern match the other's artifacts. A fixed length cannot.
+      - id: key
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          IMAGE: ${{ inputs.image_name }}
+          SUFFIX: ${{ inputs.tag_suffix }}
+        run: |
+          set -euo pipefail
+          key="$(printf '%s\n' "${REGISTRY}" "${IMAGE}" "${SUFFIX}" | sha256sum | cut -c1-16)"
+          printf 'key=%s\n' "${key}" >> "${GITHUB_OUTPUT}"
+          echo "Digest artifacts of ${REGISTRY} ${IMAGE} '${SUFFIX}': digests-${key}-*"
 
   # ────────────────────────────────────────────────────────────────
   # Per-platform build on the native runner. Each shard pushes its
@@ -312,7 +335,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
-          name: digests-${{ matrix.hardware }}
+          name: digests-${{ needs.compute-matrix.outputs.artifact_key }}-${{ matrix.hardware }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -342,8 +365,9 @@ jobs:
   # and it is attached last.
   # ────────────────────────────────────────────────────────────────
   merge:
-    # `compute-matrix` is needed for its matrix, not for its ordering:
-    # `runs-on` below reads it. `publish` is the real predecessor.
+    # `compute-matrix` is needed for what it derives, not for its ordering:
+    # `runs-on` below reads its matrix and the download its artifact key.
+    # `publish` is the real predecessor.
     needs: [compute-matrix, publish]
     # DERIVED FROM THE MATRIX, not pinned to a hosted label. This job now
     # RUNS an image, and a runner can only run its own architecture, so
@@ -388,7 +412,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: digests-${{ needs.compute-matrix.outputs.artifact_key }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx

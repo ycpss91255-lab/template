@@ -7,7 +7,7 @@
 # The dispatcher is a two-job reusable workflow on top of
 # build-worker.yaml:
 #
-# 1. `resolve-matrix` — pure-shell selector that emits a `matrix`
+# 1. `resolve-matrix` — shell and jq selector that emits a `matrix`
 #    `include`-shape JSON array output based on `github.event_name`.
 #    `pull_request` -> `pr_matrix` (subset); everything else (tag push,
 #    main push, workflow_dispatch) -> `tag_matrix` (full release matrix).
@@ -41,7 +41,7 @@
 # github.event_name == 'pull_request' && ... || ... }}` expression. Three
 # jobs:
 #
-# 1. **`resolve-matrix`** — pure-shell selector emitting a `matrix`
+# 1. **`resolve-matrix`** — shell and jq selector emitting a `matrix`
 # JSON-array output (`include`-shape, each entry has `name` + `build_args`
 # plus arbitrary additional fields). `pull_request` -> `pr_matrix` (subset);
 # anything else (tag push, main push, `workflow_dispatch`) -> `tag_matrix`
@@ -116,6 +116,14 @@ setup() {
   WF="/source/.github/workflows/multi-distro-build-worker.yaml"
   assert_spec_subject "${WF}" \
       "the multi-distro build worker this spec pins"
+  # Scratch for the cases that RUN the resolve-matrix step's own body.
+  SCRATCH="$(mktemp -d)"
+}
+
+teardown() {
+  if [[ -n "${SCRATCH:-}" ]]; then
+    rm -rf "${SCRATCH}"
+  fi
 }
 
 # _on_block -- the code lines of the trigger + workflow_call interface, from
@@ -131,6 +139,94 @@ _input_block() {
       '$0 ~ _key {flag=1; next} /^      [a-z]/{flag=0} flag' "${WF}" \
     | strip_comments
 }
+
+# _runner_output <file> <name> -- what the runner reads for output <name> from
+# a GITHUB_OUTPUT file: `name=value` lines and `name<<DELIMITER` blocks, and a
+# failure on any other line, in the runner's own words. Grepping the file for
+# `name=` would accept a file the runner refuses (base#2160).
+_runner_output() {
+  awk -v want="${2}" '
+    function keep() { if (name == want) { result = value; got = 1 } }
+    delim != "" && $0 == delim { keep(); delim = ""; next }
+    delim != "" { value = value sep $0; sep = "\n"; next }
+    $0 == "" { next }
+    {
+      eq = index($0, "=")
+      here = index($0, "<<")
+      if (eq && (!here || eq < here)) {
+        name = substr($0, 1, eq - 1)
+        value = substr($0, eq + 1)
+        keep()
+        next
+      }
+      if (here) {
+        name = substr($0, 1, here - 1)
+        delim = substr($0, here + 2)
+        value = sep = ""
+        next
+      }
+      printf "Invalid format \047%s\047\n", $0
+      bad = 1
+      exit
+    }
+    END {
+      if (bad) { exit 1 }
+      if (delim != "") { print "unterminated block"; exit 1 }
+      if (!got) { print "no such output"; exit 1 }
+      print result
+    }
+  ' "${1}"
+}
+
+# _resolved_matrix <event> <pr_matrix> <tag_matrix> -- RUN the resolve-matrix
+# step for one call of the worker and print the `matrix` output the runner
+# hands to call-build. 1 when the step fails, 3 when it succeeds and the runner
+# has no matrix to hand over: the job is green then, and only one of the two
+# is a refusal.
+_resolved_matrix() {
+  local _body _status=0
+  _body="$(yaml_step_run "${WF}" resolve-matrix r)" || _status=$?
+  if [[ "${_status}" -ne 0 || -z "${_body}" || "${_body}" == 'null' ]]; then
+    printf 'BUG: could not read the resolve-matrix step of %s\n' "${WF}"
+    return 2
+  fi
+  printf '%s\n' "${_body}" > "${SCRATCH}/step.sh"
+  : > "${SCRATCH}/output"
+  EVENT_NAME="${1}" PR_MATRIX="${2}" TAG_MATRIX="${3}" \
+    GITHUB_OUTPUT="${SCRATCH}/output" bash "${SCRATCH}/step.sh" || return 1
+  _runner_output "${SCRATCH}/output" matrix || return 3
+}
+
+# _assert_resolves <event> <pr_matrix> <tag_matrix> <expected> -- the step
+# succeeds and call-build's fromJSON reads the JSON value <expected> spells.
+_assert_resolves() {
+  local _expected
+  _expected="$(jq -cS . <<< "${4}")" || fail "the expected value is not JSON"
+  run _resolved_matrix "${1}" "${2}" "${3}"
+  assert_success
+  run jq -cS . <<< "${output}"
+  assert_success
+  assert_output "${_expected}"
+}
+
+# _assert_refuses <event> <pr_matrix> <tag_matrix> <input> -- the step fails
+# naming <input>, and leaves no matrix output behind.
+_assert_refuses() {
+  run _resolved_matrix "${1}" "${2}" "${3}"
+  assert_failure 1
+  assert_output --partial '::error::'
+  assert_output --partial "${4}"
+  run cat "${SCRATCH}/output"
+  assert_output ''
+}
+
+# What a caller writes under `tag_matrix: |`, as app/ros1_bridge does.
+readonly _MULTI='[
+  {"name": "humble", "build_args": "ROS2_DISTRO=humble"},
+  {"name": "jazzy",  "build_args": "ROS2_DISTRO=jazzy"}
+]
+'
+readonly _SINGLE='[{"name":"humble","build_args":"ROS2_DISTRO=humble"}]'
 
 # ── workflow_call interface ─────────────────────────────────────────
 
@@ -197,8 +293,58 @@ _input_block() {
   assert_success
   assert_output --partial 'EVENT_NAME: ${{ github.event_name }}'
   assert_output --partial '"${EVENT_NAME}" == "pull_request"'
-  assert_output --partial 'matrix=${PR_MATRIX}'
-  assert_output --partial 'matrix=${TAG_MATRIX}'
+  assert_output --partial 'PR_MATRIX: ${{ inputs.pr_matrix }}'
+  assert_output --partial 'TAG_MATRIX: ${{ inputs.tag_matrix }}'
+}
+
+# why: base#2160. app/ros1_bridge writes tag_matrix as a block scalar, and the
+# runner refused the multi-line `matrix=` line with "Invalid format ']'", so
+# every push to main and every release failed while pull requests passed.
+@test "multi-distro-build-worker.yaml: a multi-line tag_matrix reaches fromJSON on push and workflow_dispatch (base#2160)" {
+  _assert_resolves push "${_SINGLE}" "${_MULTI}" "${_MULTI}"
+  _assert_resolves workflow_dispatch "${_SINGLE}" "${_MULTI}" "${_MULTI}"
+}
+
+# why: base#2160. The same write on the other branch of the event check.
+@test "multi-distro-build-worker.yaml: a multi-line pr_matrix reaches fromJSON on pull_request (base#2160)" {
+  _assert_resolves pull_request "${_MULTI}" "${_SINGLE}" "${_MULTI}"
+}
+
+# why: base#2160. The single-line spelling worked before and must keep its
+# value, and each event must still pick its own input.
+@test "multi-distro-build-worker.yaml: a single-line matrix reaches fromJSON, from the input the event selects (base#2160)" {
+  local _other='[{"name":"jazzy","build_args":"ROS2_DISTRO=jazzy"}]'
+  _assert_resolves pull_request "${_SINGLE}" "${_other}" "${_SINGLE}"
+  _assert_resolves push "${_SINGLE}" "${_other}" "${_other}"
+}
+
+# why: base#2160. A fix that joins or rewrites the lines as text can damage a
+# value: an escaped newline in build_args, spaces, and the characters the
+# GITHUB_OUTPUT format itself uses.
+@test "multi-distro-build-worker.yaml: an entry's own characters survive the hand-over (base#2160)" {
+  local _value='[
+  {"name": "a", "build_args": "A=1\nB=two  words\tC<<EOF", "note": "\"q\" \\ $(x) é %0A"}
+]'
+  _assert_resolves push "${_SINGLE}" "${_value}" "${_value}"
+}
+
+# why: base#2160. An unreadable matrix must fail in this job, naming the input
+# the caller wrote, and not as an empty matrix in call-build. A second JSON
+# document and a non-array are refused for the same reason: `include:` takes
+# one array.
+@test "multi-distro-build-worker.yaml: an input that is not one JSON array is refused by name (base#2160)" {
+  local _bad
+  for _bad in '[{"name":"humble",}' 'humble' '' $'\n' '{"name":"humble"}' '[] []' 'null'; do
+    _assert_refuses push "${_SINGLE}" "${_bad}" tag_matrix
+    _assert_refuses pull_request "${_bad}" "${_SINGLE}" pr_matrix
+  done
+}
+
+# why: base#2160. The event selects one input; what the other holds must not
+# fail a run that never uses it.
+@test "multi-distro-build-worker.yaml: the input the event does not select is not judged (base#2160)" {
+  _assert_resolves push 'not json' "${_MULTI}" "${_MULTI}"
+  _assert_resolves pull_request "${_MULTI}" '' "${_MULTI}"
 }
 
 # ── call-build matrix job ────────────────────────────────────────────

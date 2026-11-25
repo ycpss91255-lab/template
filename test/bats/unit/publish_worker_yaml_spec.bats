@@ -123,6 +123,47 @@ _compute_matrix_for() {
   sed -n 's/^matrix=//p' "${_dir}/output"
 }
 
+# _artifact_key_for <registry> <image> <suffix> -- RUN the compute-matrix
+# job's artifact-key step for one call of the worker and print the key.
+_artifact_key_for() {
+  local _body _dir _status=0
+  _body="$(yaml_step_run "${WF}" compute-matrix key)" || _status=$?
+  if [[ "${_status}" -ne 0 || -z "${_body}" || "${_body}" == 'null' ]]; then
+    printf 'BUG: could not read the artifact-key step of %s\n' "${WF}"
+    return 2
+  fi
+  _dir="${SCRATCH}/key"
+  mkdir -p "${_dir}"
+  printf '%s\n' "${_body}" > "${_dir}/step.sh"
+  : > "${_dir}/output"
+  REGISTRY="${1}" IMAGE="${2}" SUFFIX="${3}" GITHUB_OUTPUT="${_dir}/output" \
+    bash "${_dir}/step.sh" >/dev/null || return 1
+  sed -n 's/^key=//p' "${_dir}/output"
+}
+
+# _artifact_value <key> -- the one value the workflow gives the artifact
+# input <key> (`name` or `pattern`), as written, expressions unexpanded.
+_artifact_value() {
+  strip_comments < "${WF}" | sed -nE "s/^[[:space:]]+${1}: (digests-.*)\$/\1/p"
+}
+
+# _expand_artifact <template> <registry> <image> <suffix> <hardware> -- what
+# GitHub makes of <template> in one call's jobs. The key is computed only
+# where the template reads it, and an expression left over fails.
+_expand_artifact() {
+  local _t="${1}" _key
+  local _k='${{ needs.compute-matrix.outputs.artifact_key }}'
+  local _h='${{ matrix.hardware }}'
+  if [[ "${_t}" == *"${_k}"* ]]; then
+    _key="$(_artifact_key_for "${2}" "${3}" "${4}")" || { printf '%s\n' "${_key}"; return 1; }
+    [[ -n "${_key}" ]] || { printf 'BUG: empty artifact key\n'; return 1; }
+    _t="${_t//"${_k}"/"${_key}"}"
+  fi
+  _t="${_t//"${_h}"/"${5}"}"
+  [[ "${_t}" != *'${{'* ]] || { printf 'BUG: unexpanded: %s\n' "${_t}"; return 1; }
+  printf '%s\n' "${_t}"
+}
+
 # _docker_stub -- put a `docker` on PATH that answers for ONE registry state,
 # so the tag-confirmation step can be RUN rather than read.
 #
@@ -609,8 +650,91 @@ _confirm_step_for() {
 @test "publish-worker.yaml: each shard exports + uploads its digest as an artifact (#602)" {
   run code_grep -F 'actions/upload-artifact' "${WF}"
   assert_success
-  run code_grep -F 'name: digests-${{ matrix.hardware }}' "${WF}"
+  run _artifact_value name
   assert_success
+  assert_output --regexp '^digests-.*\$\{\{ matrix\.hardware \}\}$'
+}
+
+# why: Artifacts belong to the workflow RUN, not to one call of a reusable
+# workflow, and the caller this worker is written for calls it once per
+# variant from a matrix. A name two variants share fails the second upload,
+# and a download that reaches another variant's digests assembles that
+# variant's image under this one's tag (base#2130)
+@test "publish-worker.yaml: no two variants of one run share or reach each other's digest artifacts (base#2130)" {
+  local _name _pattern
+  _name="$(_artifact_value name)"
+  _pattern="$(_artifact_value pattern)"
+  [[ -n "${_name}" && "${_name}" != *$'\n'* ]] || fail "expected one upload name, got: ${_name}"
+  [[ -n "${_pattern}" && "${_pattern}" != *$'\n'* ]] || fail "expected one download pattern, got: ${_pattern}"
+
+  # Suffixes that are prefixes of one another, the empty one, and the same
+  # suffix under another image or registry: every pair has to stay apart.
+  local -a _calls=(
+    'ghcr.io|ros_distro|'
+    'ghcr.io|ros_distro|-noetic'
+    'ghcr.io|ros_distro|-noetic-ros-base'
+    'ghcr.io|ros_distro|-noetic-x86_64'
+    'ghcr.io|ros_distro-noetic|'
+    'ghcr.io|org/ros_distro|-noetic'
+    'docker.io|ros_distro|-noetic'
+  )
+  local _i _j _hw _reg _img _suf _glob
+  local -a _owner=() _names=() _globs=()
+  for _i in "${!_calls[@]}"; do
+    IFS='|' read -r _reg _img _suf <<< "${_calls[_i]}"
+    for _hw in x86_64 aarch64; do
+      _names+=("$(_expand_artifact "${_name}" "${_reg}" "${_img}" "${_suf}" "${_hw}")") \
+        || fail "${_names[-1]}"
+      _owner+=("${_i}")
+    done
+    _globs+=("$(_expand_artifact "${_pattern}" "${_reg}" "${_img}" "${_suf}" '')") \
+      || fail "${_globs[-1]}"
+  done
+
+  for _j in "${!_names[@]}"; do
+    # The characters upload-artifact refuses in a name.
+    [[ "${_names[_j]}" =~ ^[A-Za-z0-9._-]+$ ]] \
+      || fail "not a usable artifact name: ${_names[_j]}"
+    for _i in "${!_names[@]}"; do
+      (( _i == _j )) || [[ "${_names[_i]}" != "${_names[_j]}" ]] \
+        || fail "'${_calls[_owner[_i]]}' and '${_calls[_owner[_j]]}' both upload ${_names[_j]}"
+    done
+    for _i in "${!_globs[@]}"; do
+      _glob="${_globs[_i]}"
+      # shellcheck disable=SC2053 # the pattern is meant to glob.
+      if [[ "${_names[_j]}" == ${_glob} ]]; then
+        (( _i == _owner[_j] )) \
+          || fail "the merge of '${_calls[_i]}' downloads ${_names[_j]} of '${_calls[_owner[_j]]}'"
+      else
+        (( _i != _owner[_j] )) \
+          || fail "the merge of '${_calls[_i]}' does not download its own ${_names[_j]}"
+      fi
+    done
+  done
+}
+
+# why: The key has to reach both jobs as an output of the job that computes
+# it; an output that names no step expands to nothing, and every variant is
+# back to one shared name (base#2130)
+@test "publish-worker.yaml: the artifact key is an output of compute-matrix read from its step (base#2130)" {
+  run yaml_job_lines "${WF}" compute-matrix
+  assert_success
+  assert_output --partial 'artifact_key: ${{ steps.key.outputs.key }}'
+  assert_output --partial '- id: key'
+  assert_output --partial 'REGISTRY: ${{ inputs.registry }}'
+  assert_output --partial 'IMAGE: ${{ inputs.image_name }}'
+  assert_output --partial 'SUFFIX: ${{ inputs.tag_suffix }}'
+  run _artifact_key_for ghcr.io ros_distro -noetic
+  assert_success
+  assert_output --regexp '^[0-9a-f]{16}$'
+  local _job
+  for _job in publish merge; do
+    run yaml_job_lines "${WF}" "${_job}"
+    # One line at a time: across lines the read of the output below would
+    # itself satisfy this.
+    assert_line --regexp '^    needs: (compute-matrix|\[.*compute-matrix.*\])$'
+    assert_output --partial 'needs.compute-matrix.outputs.artifact_key'
+  done
 }
 
 @test "publish-worker.yaml: merge job assembles the multi-arch manifest via imagetools (#602)" {

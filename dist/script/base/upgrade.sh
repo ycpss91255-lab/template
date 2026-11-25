@@ -187,6 +187,10 @@ _UPGRADE_DRIFT_SPLIT=""
 # the absence is never left to read as agreement.
 _UPGRADE_DRIFT_UNVERIFIED=""
 
+# The base worker refs Step 4 could not bring to the target, as
+# `<line>: <ref>`; reported with the advisory findings.
+_UPGRADE_LEFT_REFS=()
+
 # ── Safety guards ────────────────────────────────────────────────────────────
 #
 # git-subtree pull is known to misbehave on some versions (reports of
@@ -617,6 +621,79 @@ _check() {
   esac
 }
 
+# _base_worker_uses <text>
+#   Every `uses:` of a base worker in <text> that Step 4 can rewrite, under
+#   the current or the retired slug, one `uses: <slug>/<path>@<ref>` per line
+#   in file order.
+_base_worker_uses() {
+  local _slugs="(${BASE_UPSTREAM_RETIRED_RE}|${BASE_UPSTREAM_SLUG//./\\.})"
+  printf '%s\n' "${1}" \
+    | grep -oE "(^|[^A-Za-z0-9_-])uses[\"']?[[:space:]]*:[[:space:]]*[\"']?${_slugs}/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@[^][:space:]\"',}]*" \
+    || true
+}
+
+# _workers_with_changed_ref <before> <after>
+#   The worker file names whose `uses:` differs between two texts Step 4 made
+#   one from the other, sorted and space-separated on one line; nothing when
+#   none does. The rewrite adds and removes no `uses:`, so the two lists pair
+#   up by position: not `diff`, whose output format is not a contract (GNU
+#   defaults to `> new`, busybox to `+new`), not a set of lines, which loses a
+#   line rewritten into text another job already has, and not the whole line,
+#   where a comment or a second ref can stand in for the one that changed.
+_workers_with_changed_ref() {
+  local -a _old _new
+  local _i _ref _names
+  mapfile -t _old < <(_base_worker_uses "${1}")
+  mapfile -t _new < <(_base_worker_uses "${2}")
+  _names="$(for _i in "${!_new[@]}"; do
+    [[ "${_old[_i]-}" != "${_new[_i]}" ]] || continue
+    _ref="${_new[_i]%%@*}"
+    printf '%s\n' "${_ref##*/}"
+  done | sort -u | tr '\n' ' ')"
+  printf '%s' "${_names% }"
+}
+
+# _collect_left_worker_refs <main.yaml> <target version>
+#   Record in _UPGRADE_LEFT_REFS the base worker refs that are still under
+#   the retired slug, or at another release, after Step 4. The rewrite needs
+#   the ref directly behind its `uses:`; YAML also allows it on the next
+#   line, in a block scalar, or behind an anchor or a tag, and those are left
+#   to the user rather than guessed at. Read as text: whatever follows a
+#   blank and a `#` counts as a comment, even inside a quoted value, and a
+#   ref in a value that is not a `uses:` is recorded too.
+_collect_left_worker_refs() {
+  local _file="${1}" _target="${2}" _line _ref
+  local _slugs="(${BASE_UPSTREAM_RETIRED_RE}|${BASE_UPSTREAM_SLUG//./\\.})"
+  _UPGRADE_LEFT_REFS=()
+  while IFS=: read -r _line _ref; do
+    # `grep -o` carries the one character that bounded the match on the left.
+    [[ "${_ref}" == [A-Za-z0-9]* ]] || _ref="${_ref:1}"
+    case "${_ref}" in
+      "${BASE_UPSTREAM_SLUG}"/*@"${_target}") continue ;;
+      "${BASE_UPSTREAM_SLUG}"/*@v[0-9]*.[0-9]*.[0-9]*) ;;
+      "${BASE_UPSTREAM_SLUG}"/*) continue ;;
+    esac
+    _UPGRADE_LEFT_REFS+=("${_line}: ${_ref}")
+  done < <(sed -E 's/(^|[[:space:]])#.*$//' "${_file}" \
+    | grep -noE "(^|[^A-Za-z0-9_.-])${_slugs}/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@[^][:space:]\"',}]*" \
+    || true)
+}
+
+# _warn_left_worker_refs <target version>
+#   Name every ref _collect_left_worker_refs recorded; silent when none.
+_warn_left_worker_refs() {
+  (( ${#_UPGRADE_LEFT_REFS[@]} > 0 )) || return 0
+  _log_warn upgrade upgrade_worker_refs_left \
+    "display=WARNING: ${#_UPGRADE_LEFT_REFS[@]} base worker ref(s) in .github/workflows/main.yaml are not at ${1} after the rewrite. If a job calls one, set it to ${BASE_UPSTREAM_SLUG}/...@${1} by hand, or the job keeps calling what it names now." \
+    "count=${#_UPGRADE_LEFT_REFS[@]}"
+  local _entry
+  for _entry in "${_UPGRADE_LEFT_REFS[@]}"; do
+    _log_warn upgrade upgrade_worker_refs_left \
+      "display=           .github/workflows/main.yaml:${_entry}" \
+      "ref=${_entry#*: }" "line=${_entry%%:*}"
+  done
+}
+
 # ── Upgrade ──────────────────────────────────────────────────────────────────
 
 _upgrade() {
@@ -813,32 +890,37 @@ _upgrade() {
     # A ref still under the slug base was published from before the org was
     # renamed (BASE_UPSTREAM_RETIRED_RE) is moved to the current slug first,
     # path and ref untouched, so the line below then bumps it like any other.
-    # Only worker paths are moved: the anchor is the same
-    # `/.github/workflows/<file>.yaml@` shape, so a retired-org reference in
-    # a comment or a URL is left alone.
-    local _before
+    #
+    # Both lines are bounded on the LEFT by a `uses` key (quoted or not) and
+    # an optional quote, with nothing between that and the slug. Without it an
+    # owner whose name merely ends in the slug matched, and the line that
+    # moves the org turned that stranger's owner into one that does not
+    # exist. It also leaves a comment that records a ref without a `uses:` as
+    # it was written; a `uses:` inside a comment is still rewritten, so a job
+    # that is commented out can be re-enabled as it stands.
+    local _before _relocated
     _before="$(cat "${main_yaml}")"
-    sed -i -E "s|${BASE_UPSTREAM_RETIRED_RE}(/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@)|${BASE_UPSTREAM_SLUG}\1|g" "${main_yaml}"
-    sed -i -E "s|(${BASE_UPSTREAM_SLUG//./\\.}/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)@v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1@${target_ver}|g" "${main_yaml}"
+    sed -i -E "s#((^|[^A-Za-z0-9_-])uses[\"']?[[:space:]]*:[[:space:]]*[\"']?)${BASE_UPSTREAM_RETIRED_RE}(/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@)#\1${BASE_UPSTREAM_SLUG}\3#g" "${main_yaml}"
+    _relocated="$(cat "${main_yaml}")"
+    sed -i -E "s#((^|[^A-Za-z0-9_-])uses[\"']?[[:space:]]*:[[:space:]]*[\"']?${BASE_UPSTREAM_SLUG//./\\.}/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml)@v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?#\1@${target_ver}#g" "${main_yaml}"
     # What the commit message says is read off what CHANGED, not restated
     # from the rule above. The old message asserted "workflow @tag updated to
     # <ver>" unconditionally, which was false on exactly the repos whose
     # unnamed worker ref it had just left behind -- and a line that cannot be
     # wrong reports nothing.
     #
-    # The comparison is `grep -Fxv -f` (the lines present now that were not
-    # present before) rather than `diff`, because diff's OUTPUT FORMAT is not
-    # a contract: GNU diff defaults to normal format (`> new`) and busybox
-    # diff -- what a consumer on Alpine has -- defaults to unified (`+new`).
-    # Reading `> ` out of it worked on the author's host and reported "nothing
-    # changed" over a file it had just rewritten four lines of.
-    local _moved
-    _moved="$(grep -Fxv -f <(printf '%s\n' "${_before}") "${main_yaml}" \
-      | sed -nE 's|^.*/([A-Za-z0-9._-]+\.ya?ml)@.*$|\1|p' \
-      | sort -u | tr '\n' ' ' || true)"
-    _moved="${_moved% }"
-    _ref_note="no base workflow @ref needed updating"
-    [[ -n "${_moved}" ]] && _ref_note="@ref updated to ${target_ver} for ${_moved}"
+    # Two things can change a ref, and only one of them is a bump: a ref that
+    # is not a release tag (`@main`) moves off the retired org and keeps its
+    # ref, so it is listed as moved and not as updated. One that moves and is
+    # bumped is in both lists (base#2118).
+    local _bumped _moved
+    _bumped="$(_workers_with_changed_ref "${_relocated}" "$(cat "${main_yaml}")")"
+    _moved="$(_workers_with_changed_ref "${_before}" "${_relocated}")"
+    _ref_note="no base workflow @ref was updated"
+    [[ -n "${_bumped}" ]] && _ref_note="@ref updated to ${target_ver} for ${_bumped}"
+    [[ -n "${_moved}" ]] \
+      && _ref_note+=$'\n'"- main.yaml: moved to ${BASE_UPSTREAM_SLUG}: ${_moved}"
+    _collect_left_worker_refs "${main_yaml}" "${target_ver}"
     git add "${main_yaml}"
   fi
 
@@ -908,9 +990,10 @@ COMMIT
   # they can opt in.
   _warn_setup_conf_drift "${_pre_setup_conf_hash}"
 
-  # Last of the three, because it is the one that names repo paths the user
-  # has to act on rather than a diff they may want to read.
+  # Last, because these two name repo paths the user has to act on rather
+  # than a diff they may want to read.
   _warn_subtree_local_drift
+  _warn_left_worker_refs "${target_ver}"
 
   _log upgrade_completed "Done! Upgraded to ${target_ver}"
   _log upgrade_completed ""
