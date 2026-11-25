@@ -689,6 +689,22 @@ _acceptance_code() {
   assert_output --partial 'needs: [actionlint, classify, test-tools-image-amd64]'
 }
 
+# why: In an unquoted YAML value a blank followed by `#` starts a comment, so
+# a name carrying an issue number is cut off there and the check list shows
+# half of it (base#2121)
+@test "self-test.yaml: no unquoted name: is cut short by a # (base#2121)" {
+  # Opening with a quote or a block indicator, the value is not a plain
+  # scalar and its `#` is text.
+  local _re="^[[:space:]]*(- )?name:[[:space:]]+[^\"'|>[:space:]].*[[:space:]]#"
+  run grep -cE "${_re}" <<< '    name: Smoke (gate, #1)'
+  assert_output "1"
+  run grep -cE "${_re}" <<< '    name: "Smoke (gate, #1)"'
+  assert_output "0"
+  run grep -nE "${_re}" "${WF}"
+  assert_failure 1
+  assert_output ''
+}
+
 # ── Conditional gating ───────────────────────────────────
 
 @test "self-test.yaml: bats-fragile job-level if: gates on classify's select_bats_fragile (#677, base#1584)" {
@@ -1844,42 +1860,42 @@ _builder_setups_out_of_step_with_their_consumer() {
 # why: The ungated jobs never skip on purpose, so a SKIPPED there is a
 # workflow bug the strict loop must not collapse into a pass.
 @test "self-test.yaml: ci-rollup requires hard-mandatory jobs to be success (#337 + #377)" {
-  # actionlint + classify + doc-counts + lint-static + mutation-roster +
-  # compute-shards are hard-mandatory: they carry no `if:` gate and no
+  # actionlint + classify + doc-counts + lint-static + compute-shards +
+  # the amd64 image builder are hard-mandatory: they carry no `if:` gate and no
   # select_* key, so SKIPPED there indicates a workflow bug, not an
   # intentional gate. Proven by running the step with each one skipped
   # and every select_* key `false`, the most permissive classify
   # (base#1584).
   _rollup_hard_mandatory actionlint classify doc-counts lint-static \
-      mutation-roster compute-shards test-tools-image-amd64 \
-      test-tools-image-arm64
+      compute-shards test-tools-image-amd64
 }
 
-# why: The two test-tools-image builders (base#1588) feed doc-counts,
-# lint-static and mutation-roster, which carry no `if:`, so the builders
-# must run on every event too -- merge_group included (base#1587). The
-# rollup's job-to-key map (base#1584) excuses a skip only for a job it
-# names, so the decision is explicit: the builders carry no job-level
-# `if:` and the map does not name them, which makes their skip fail.
-@test "self-test.yaml: the test-tools-image builders always run and their skip fails ci-rollup (base#1588, base#1584)" {
-  local _b _if _bad=""
+# why: The amd64 test-tools-image builder (base#1588) feeds doc-counts and
+# lint-static, which carry no `if:`, so it must run on every event too --
+# merge_group included (base#1587) -- and its skip must fail the rollup
+# even beside a select_* key its name could be rewritten to. The arm64
+# builder feeds only acceptance, so a docs-only pull request skips it on
+# its own key (base#2110).
+@test "self-test.yaml: the amd64 test-tools-image builder always runs, the arm64 one skips only on its own key (base#1588, base#2110)" {
+  local _b _rc
   for _b in test-tools-image-amd64 test-tools-image-arm64; do
     run yaml_job_needs "${WF}" ci-rollup
     assert_line "${_b}"
-    _if="$(yq ".jobs[\"${_b}\"].if // \"\"" "${WF}")"
-    [[ -z "${_if}" ]] || _bad+=" ${_b} has if: ${_if};"
-    # A select_* key the builder's name could be rewritten to, set
-    # `false`, must still not excuse the skip.
-    [[ "$(_rollup_rc "${WF}" ".[\"${_b}\"].result = \"skipped\"
-        | .classify.outputs.select_${_b//-/_} = \"false\"
-        | .classify.outputs |= with_entries(if (.key | startswith(\"select_\")) then .value = \"false\" else . end)")" == 1 ]] \
-      || _bad+=" ${_b} skip passes;"
   done
-  run yq '.jobs["ci-rollup"].steps[] | select(.name == "Verify upstream jobs") | .run' "${WF}"
-  assert_success
-  assert_output --partial '"config-gen-redpath": "select_config_gen"'
-  refute_output --partial '"test-tools-image-'
-  [[ -z "${_bad}" ]] || fail "${_bad}"
+  run yq '.jobs["test-tools-image-amd64"].if // ""' "${WF}"
+  assert_output ''
+  _rc="$(_rollup_rc "${WF}" '.["test-tools-image-amd64"].result = "skipped"
+      | .classify.outputs.select_test_tools_image_amd64 = "false"
+      | .classify.outputs |= with_entries(if (.key | startswith("select_")) then .value = "false" else . end)')"
+  assert_equal "${_rc}" 1
+  run yq '.jobs["test-tools-image-arm64"].if // ""' "${WF}"
+  assert_output "needs.classify.outputs.select_test_tools_image_arm64 == 'true'"
+  # No job but acceptance consumes the arm64 builder, so nothing a
+  # docs-only run keeps can be skipped with it.
+  run yq '.jobs | to_entries[] | select(.value.needs[]? == "test-tools-image-arm64") | .key' "${WF}"
+  assert_output 'acceptance
+ci-rollup
+release'
 }
 
 # why: compute-shards carries no `if:` gate, so a SKIPPED there is a
@@ -2471,6 +2487,27 @@ EOF
   # the bare word keeps the job's own comment (which explains WHY it is
   # ungated, and so names the gate) from satisfying the refutation.
   refute_output --partial 'if: needs.classify.outputs'
+}
+
+# why: base#2110. A docs-only pull request runs the jobs that carry no
+# classify gate, and none of them may run bats, coverage or a mutation row:
+# those run in the merge queue, where classify selects every job. What such
+# a job calls of the test driver is a lint.
+@test "self-test.yaml: the jobs a docs-only pull request runs start no bats (base#2110)" {
+  local _job _calls _all=""
+  while IFS= read -r _job; do
+    # The two that run after the others: they wait on jobs and start none.
+    case "${_job}" in ci-rollup|release) continue ;; esac
+    [[ "$(yq ".jobs[\"${_job}\"].if // \"\"" "${WF}")" != *needs.classify.outputs.select_* ]] || continue
+    _calls="$(yq ".jobs[\"${_job}\"].steps[].run // \"\"" "${WF}" | grep -v '^[[:space:]]*#' \
+      | grep -E 'test\.sh|just test|(^|[[:space:];&|(])bats[[:space:]]' || true)"
+    [[ -z "${_calls}" ]] || _all+="$(sed "s|^[[:space:]]*|${_job}: |" <<< "${_calls}")"$'\n'
+  done < <(yq '.jobs | keys | .[]' "${WF}")
+  # Non-vacuity: the two lint jobs are read.
+  grep -q '^doc-counts: .*--lint --doc-counts' <<< "${_all}" || fail "doc-counts not read: ${_all}"
+  grep -q '^lint-static: .*--lint --group' <<< "${_all}" || fail "lint-static not read: ${_all}"
+  run grep -vE -- '^$|test\.sh --lint( |-group-members )' <<< "${_all}"
+  assert_output ''
 }
 
 @test "self-test.yaml: ci-rollup treats doc-counts as hard-mandatory, not SKIPPED-tolerant (#864)" {

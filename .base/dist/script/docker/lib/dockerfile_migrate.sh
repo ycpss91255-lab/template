@@ -120,6 +120,7 @@ _dfm_join_copy_statements() {
 # the dispatcher answers it, and a migration author cannot get it wrong by
 # writing in an unanticipated way.
 _DFM_TOUCHED=()
+_DFM_CHANGED=()
 _DFM_TARGETS=()
 _DFM_BEFORE_DIR=""
 
@@ -135,6 +136,28 @@ _dfm_record() {
   return 0
 }
 
+# _dfm_changed <path>
+#   Note that a write helper just changed <path>: the record above, and the
+#   pending notice _dfm_take_changed reads.
+_dfm_changed() {
+  _dfm_record "$1"
+  _DFM_CHANGED+=("$1")
+}
+
+# _dfm_take_changed <path>
+#   True when a write helper changed <path> since this was last asked, and
+#   forgets it. A migration reports a file as patched only then: a detect
+#   that fired and a rewrite that changed no byte is not a patch (base#2138).
+_dfm_take_changed() {
+  local _path _found=1
+  local -a _rest=()
+  for _path in ${_DFM_CHANGED[@]+"${_DFM_CHANGED[@]}"}; do
+    if [[ "${_path}" == "$1" ]]; then _found=0; else _rest+=("${_path}"); fi
+  done
+  _DFM_CHANGED=(${_rest[@]+"${_rest[@]}"})
+  return "${_found}"
+}
+
 # _dfm_sed <file> <sed_arg>...
 #   `sed -i` over <file>, recorded when it actually changed the bytes. The
 #   file comes FIRST so the record cannot be skipped by an argument order
@@ -146,7 +169,7 @@ _dfm_sed() {
   _before="$(mktemp)"
   cp -- "${_file}" "${_before}"
   sed -i "$@" "${_file}"
-  cmp -s -- "${_before}" "${_file}" || _dfm_record "${_file}"
+  cmp -s -- "${_before}" "${_file}" || _dfm_changed "${_file}"
   rm -f -- "${_before}"
   return 0
 }
@@ -164,7 +187,7 @@ _dfm_install() {
   cmp -s -- "${_file}" "${_new}" || _changed=1
   chmod --reference="${_file}" -- "${_new}"
   mv -- "${_new}" "${_file}"
-  (( _changed )) && _dfm_record "${_file}"
+  (( _changed )) && _dfm_changed "${_file}"
   return 0
 }
 
@@ -298,6 +321,7 @@ migrated_files() {
 apply_migrations() {
   local _file="${1:?apply_migrations requires a Dockerfile path}"
   _DFM_TOUCHED=()
+  _DFM_CHANGED=()
 
   if [[ ! -f "${_file}" ]]; then
     _log_info upgrade dockerfile_migration_skipped "display=  no Dockerfile at ${_file} — skip migrations"
@@ -349,7 +373,9 @@ _migrate_downstream_to_dist_detect() {
 _migrate_downstream_to_dist_apply() {
   local _file="$1"
   _dfm_sed "${_file}" 's#\.base/downstream/#.base/dist/#g'
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: .base/downstream/ -> .base/dist/ (#714)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: .base/downstream/ -> .base/dist/ (#714)"
+  fi
 }
 
 # ── Migration 1: wrapper COPY shape A/B -> wrapper/*.sh ─────────────────────
@@ -374,7 +400,9 @@ _migrate_wrapper_copy_apply() {
   _dfm_sed "${_file}" -E 's|^([[:space:]]*)COPY[[:space:]]+\*\.sh[[:space:]]+/lint/|\1COPY .base/script/docker/wrapper/*.sh /lint/|'
   # Shape B: flat top-level .base glob.
   _dfm_sed "${_file}" -E 's|^([[:space:]]*)COPY[[:space:]]+\.base/script/docker/\*\.sh[[:space:]]+/lint/|\1COPY .base/script/docker/wrapper/*.sh /lint/|'
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: wrapper COPY -> .base/script/docker/wrapper/*.sh (#567 m1)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: wrapper COPY -> .base/script/docker/wrapper/*.sh (#567 m1)"
+  fi
 }
 
 # ── Migration 2: retired .base/dockerfile/setup pip helper ──────────────────
@@ -786,7 +814,9 @@ _migrate_pip_helper_apply() {
 
   _dfm_sed "${_file}" -E "\\%${_DFM_PIP_HELPER_RE}%d"
   _dfm_sed "${_file}" '/^# Setup pip packages$/d'
-  _log_warn upgrade dockerfile_patched "display=  Dockerfile patched: dropped retired CONFIG_DIR pip helper line (#567 m2) — re-add an explicit pip step if you ship a real requirements file"
+  if _dfm_take_changed "${_file}"; then
+    _log_warn upgrade dockerfile_patched "display=  Dockerfile patched: dropped retired CONFIG_DIR pip helper line (#567 m2) — re-add an explicit pip step if you ship a real requirements file"
+  fi
 }
 
 # ── Migration 3: explicit hand-listed lib/wrapper COPYs ─────────────────────
@@ -836,7 +866,9 @@ _migrate_explicit_copy_apply() {
     { print }
   ' "${_file}" > "${_tmp}"
   _dfm_install "${_file}" "${_tmp}"
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: dropped redundant explicit lib/wrapper COPY(s) (#567 m3)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: dropped redundant explicit lib/wrapper COPY(s) (#567 m3)"
+  fi
 }
 
 # ── Migration 4: _entrypoint_logging.sh -> runtime/logging.sh rename ────────
@@ -876,9 +908,13 @@ _migrate_logging_rename_apply() {
   _entry="$(_dfm_entrypoint_path "${_file}")"
   if [[ -f "${_entry}" ]] && grep -q '_entrypoint_logging\.sh' "${_entry}"; then
     _dfm_sed "${_entry}" 's|/usr/local/lib/base/_entrypoint_logging\.sh|/usr/local/lib/base/logging.sh|g'
-    _log_info upgrade entrypoint_patched "display=  entrypoint patched: _entrypoint_logging.sh -> logging.sh source (#567 m4)"
+    if _dfm_take_changed "${_entry}"; then
+      _log_info upgrade entrypoint_patched "display=  entrypoint patched: _entrypoint_logging.sh -> logging.sh source (#567 m4)"
+    fi
   fi
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: _entrypoint_logging.sh -> runtime/logging.sh (#567 m4)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: _entrypoint_logging.sh -> runtime/logging.sh (#567 m4)"
+  fi
 }
 
 # ── Migration 5: hadolint rules surfaced by the slimmed .hadolint.yaml ──────
@@ -889,7 +925,11 @@ _migrate_logging_rename_apply() {
 # violations the ad-hoc fanout fixed by hand (each sub-fix is idempotent):
 #   DL3007  pin `FROM bats/bats:latest` / `FROM alpine:latest` helper stages
 #   DL3046  `useradd -u`  -> `useradd -l -u`
-#   DL3003  `RUN cd /lint && hadolint ...` -> `WORKDIR /lint` + `RUN hadolint`
+#   DL3003  `RUN cd /lint && hadolint ...` gains an inline
+#           `# hadolint ignore=DL3003`. Rewriting it to `WORKDIR /lint` would
+#           move every later instruction of the stage, and the image, into
+#           /lint (base#2150); dropping the `cd` would lose the
+#           .hadolint.yaml hadolint reads from its working directory
 #   DL3042  `pip install -r` -> `pip install --no-cache-dir -r`
 #   DL4006  alpine lint-tools stage gains a `SHELL [ash -o pipefail]`
 #   DL3006  parameterized `FROM ${BASE_IMAGE}` / `${TEST_TOOLS_IMAGE}` gains
@@ -902,7 +942,7 @@ _migrate_hadolint_detect() {
   local _file="$1"
   grep -Eq '^FROM (bats/bats|alpine):latest' "${_file}" && return 0
   _dfm_needs_dl3046 "${_file}" && return 0
-  grep -Eq '^[[:space:]]*RUN[[:space:]]+cd[[:space:]]+/lint[[:space:]]+&&[[:space:]]+hadolint' "${_file}" && return 0
+  _dfm_needs_dl3003 "${_file}" && return 0
   grep -Eq 'pip install[[:space:]]+-r' "${_file}" && return 0
   _dfm_needs_dl4006 "${_file}" && return 0
   _dfm_needs_dl3006 "${_file}" && return 0
@@ -952,6 +992,36 @@ _dfm_needs_dl3006() {
   local _file="$1"
   awk '
     /^FROM \$\{[A-Za-z_]+\}/ && prev !~ /hadolint ignore=DL3006/ { found=1 }
+    { prev=$0 }
+    END { exit (found ? 0 : 1) }
+  ' "${_file}"
+}
+
+# _DFM_AWK_PRAGMA
+#   awk functions reading a hadolint pragma as hadolint does: alone in its
+#   comment, with optional blanks around `=` and the commas.
+# shellcheck disable=SC2016
+_DFM_AWK_PRAGMA='
+  function pragma(text) {
+    return text ~ /^[ \t]*#[ \t]*hadolint[ \t]+ignore[ \t]*=[ \t]*[A-Z0-9]+([ \t]*,[ \t]*[A-Z0-9]+)*[ \t\r]*(#.*)?$/
+  }
+  function ignores(text, rule) {
+    if (!pragma(text)) { return 0 }
+    match(text, /=[ \t]*[A-Z0-9]+([ \t]*,[ \t]*[A-Z0-9]+)*/)
+    return (substr(text, RSTART, RLENGTH) ",") ~ ("[=, \t]" rule "[, \t]")
+  }
+  function lint_run(text) {
+    return text ~ /^[ \t]*RUN[ \t]+cd[ \t]+\/lint[ \t]+&&[ \t]+hadolint[ \t]/
+  }
+'
+
+# _dfm_needs_dl3003 <file>
+#   True when a `RUN cd /lint && hadolint ...` is present whose preceding
+#   line does not already ignore DL3003.
+_dfm_needs_dl3003() {
+  local _file="$1"
+  awk "${_DFM_AWK_PRAGMA}"'
+    lint_run($0) && !ignores(prev, "DL3003") { found=1 }
     { prev=$0 }
     END { exit (found ? 0 : 1) }
   ' "${_file}"
@@ -1044,8 +1114,27 @@ _migrate_hadolint_apply() {
   # DL3042: pip --no-cache-dir (idempotent).
   _dfm_sed "${_file}" -E 's|pip install[[:space:]]+-r|pip install --no-cache-dir -r|'
   _dfm_sed "${_file}" -E 's|pip install --no-cache-dir --no-cache-dir|pip install --no-cache-dir|'
-  # DL3003: cd /lint -> WORKDIR /lint + RUN.
-  _dfm_sed "${_file}" -E 's|^([[:space:]]*)RUN[[:space:]]+cd[[:space:]]+/lint[[:space:]]+&&[[:space:]]+hadolint[[:space:]]+(.*)$|\1WORKDIR /lint\n\1RUN hadolint \2|'
+  # DL3003: inline ignore before each unguarded `RUN cd /lint && hadolint`,
+  # extending a pragma that is already there for the reason given at DL3066.
+  if _dfm_needs_dl3003 "${_file}"; then
+    local _tmp3003
+    _tmp3003="$(mktemp)"
+    awk "${_DFM_AWK_PRAGMA}"'
+      function flush() { if (have) { print held; have = 0 } }
+      lint_run($0) && pragma(held) && !ignores(held, "DL3003") {
+        sub(/=[ \t]*[A-Z0-9]+/, "&,DL3003", held)
+      }
+      lint_run($0) && !pragma(held) {
+        flush()
+        match($0, /^[ \t]*/)
+        held = substr($0, 1, RLENGTH) "# hadolint ignore=DL3003"
+        have = 1
+      }
+      { flush(); held = $0; have = 1 }
+      END { flush() }
+    ' "${_file}" > "${_tmp3003}"
+    _dfm_install "${_file}" "${_tmp3003}"
+  fi
 
   # DL4006: SHELL ash-pipefail right after the alpine lint-tools FROM.
   if _dfm_needs_dl4006 "${_file}"; then
@@ -1100,7 +1189,9 @@ _migrate_hadolint_apply() {
     ' "${_file}" > "${_tmp3066}"
     _dfm_install "${_file}" "${_tmp3066}"
   fi
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: hadolint DL3007/DL3046/DL3003/DL3042/DL4006/DL3006/DL3066 (#567 m5, #946)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: hadolint DL3007/DL3046/DL3003/DL3042/DL4006/DL3006/DL3066 (#567 m5, #946)"
+  fi
 }
 
 # ── Migration 6: noetic entrypoint SC1090 directive ─────────────────────────
@@ -1120,7 +1211,9 @@ _migrate_sc1090_apply() {
   local _entry
   _entry="$(_dfm_entrypoint_path "$1")"
   _dfm_sed "${_entry}" -E 's|^([[:space:]]*#[[:space:]]*shellcheck disable=)SC1091([[:space:]]*)$|\1SC1090,SC1091\2|'
-  _log_info upgrade entrypoint_patched "display=  entrypoint patched: shellcheck SC1091 -> SC1090,SC1091 (#567 m6)"
+  if _dfm_take_changed "${_entry}"; then
+    _log_info upgrade entrypoint_patched "display=  entrypoint patched: shellcheck SC1091 -> SC1090,SC1091 (#567 m6)"
+  fi
 }
 
 # ── Migration 7 (facet B): ARG USER is reported, never rewritten ─────
@@ -1388,7 +1481,9 @@ _migrate_arg_user_apply() {
 # and `set -u` after so unbound vars inside setup.bash do not abort PID 1.
 #
 # Only fires when the entrypoint actually runs under nounset AND the source
-# is not already guarded by an immediately-preceding `set +u`.
+# is not already inside a stretch of the file that turned it off: one
+# `set +u` may guard several sources, and a `set -u` written after one of
+# them would end the repo's own bracket early (base#2149).
 #
 # _dfm_entry_runs_under_nounset <dockerfile>
 #   True when the file beside <dockerfile> executes with nounset in effect.
@@ -1421,17 +1516,96 @@ _migrate_nounset_source_detect() {
   _entry="$(_dfm_entrypoint_path "$1")"
   [[ -f "${_entry}" ]] || return 1
   _dfm_entry_runs_under_nounset "$1" || return 1
-  # An un-guarded source is one whose nearest preceding non-shellcheck-comment
-  # line is NOT `set +u` (a shellcheck directive sits between guard and source
-  # and must be treated as transparent so re-runs stay idempotent).
-  awk '
-    /\/opt\/ros\/.*setup\.bash/ {
-      if (guard != "+u") { found=1 }
+  _dfm_nounset_scan detect "$1"
+}
+
+# _dfm_nounset_scan <detect|apply> <dockerfile>
+#   Read the sibling entrypoint once, tracking whether nounset is on. detect
+#   succeeds when a ROS setup.bash source is reached with it on; apply prints
+#   the file with each such source bracketed, above any shellcheck directive
+#   that belongs to it. One program for both, so they cannot disagree about
+#   which source is guarded.
+#
+#   The state starts on -- detect has asked _dfm_entry_runs_under_nounset
+#   for the file -- and follows the `set` commands as written, in any
+#   spelling. A `set -u` ends a bracket only when it is not nested deeper
+#   than the `set +u` that opened it -- by indentation, or by standing inside
+#   `(`, `{` or a one-line `then` / `else` / `do`: whether that one runs is
+#   not known here. A bracket that may still be open is read as open, because
+#   leaving a source as the repo wrote it is the side that cannot break a
+#   working container.
+_dfm_nounset_scan() {
+  local _entry
+  _entry="$(_dfm_entrypoint_path "$2")"
+  awk -v mode="$1" '
+    # +1 turns nounset on, -1 turns it off, 0 says nothing about it.
+    function toggle(cmd,    n, w, k, r, way) {
+      n = split(cmd, w, /[ \t]+/)
+      if (w[1] != "set") { return 0 }
+      r = 0
+      for (k = 2; k <= n && w[k] ~ /^[-+][A-Za-z]/; k++) {
+        way = (w[k] ~ /^-/) ? 1 : -1
+        if (w[k] ~ /^.[A-Za-z]*u/) { r = way }
+        if (w[k] ~ /^.[A-Za-z]*o$/ && w[++k] ~ /^nounset/) { r = way }
+      }
+      return r
     }
-    /^[[:space:]]*#[[:space:]]*shellcheck/ { next }   # transparent: keep guard
-    /^[[:space:]]*set[[:space:]]+\+u[[:space:]]*$/ { guard="+u"; next }
-    { guard="" }
-    END { exit (found ? 0 : 1) }
+    # The command without what it stands inside, which sets nested.
+    function bared(cmd) {
+      sub(/^[ \t]+/, "", cmd)
+      while (cmd ~ /^([({]|(then|else|do)[ \t]|[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\))/) {
+        sub(/^([({]|then|else|do|[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\))[ \t]*/, "", cmd)
+        if (cmd != "") { nested = 1 }
+      }
+      return cmd
+    }
+    function command(cmd,    way) {
+      if (cmd ~ /^((fi|done|esac)([^A-Za-z0-9_]|$)|[})])/) { nested = 0 }
+      way = toggle(cmd)
+      if (way < 0 && (on || indent + nested < depth)) { on = 0; depth = indent + nested }
+      if (way > 0 && indent + nested <= depth) { on = 1 }
+      if (cmd !~ ros) { return }
+      seen = 1
+      if (on) { bare = 1 }
+    }
+    # What a subshell sets ends with it.
+    function enter() { sub_on = on; sub_depth = depth; sub_indent = indent; inside = 1 }
+    function leave() { on = sub_on; depth = sub_depth; inside = 0 }
+    function line(    part, n, i, was) {
+      match($0, /^[ \t]*/)
+      indent = RLENGTH
+      if (inside && indent == sub_indent && $0 ~ /^[ \t]*\)/) { leave() }
+      if ($0 ~ /^[ \t]*\(([^(]|$)/) { enter() }
+      seen = 0
+      nested = 0
+      was = on
+      n = split($0, part, /[;&|]+/)
+      for (i = 1; i <= n; i++) { command(bared(part[i])) }
+      # A path written across the separators above.
+      if (!seen && was && $0 ~ ros) { bare = 1 }
+      if ($0 ~ /^[ \t]*\([^(].*\)[ \t]*([;&|<>#0-9].*)?$/) { leave() }
+    }
+    BEGIN { on = 1; ros = "/opt/ros/.*setup[.]bash" }
+    {
+      bare = 0
+      if ($0 !~ /^[ \t]*#/) { line() }
+      if (mode == "detect") { if (bare) { found = 1 } ; next }
+      if (bare) {
+        print "set +u"
+        if (held != "") { print held; held = "" }
+        print
+        print "set -u"
+        on = 1
+        next
+      }
+      if (held != "") { print held; held = "" }
+      if ($0 ~ /^[ \t]*#[ \t]*shellcheck/) { held = $0; next }
+      print
+    }
+    END {
+      if (mode == "detect") { exit (found ? 0 : 1) }
+      if (held != "") { print held }
+    }
   ' "${_entry}"
 }
 
@@ -1440,25 +1614,11 @@ _migrate_nounset_source_apply() {
   _entry="$(_dfm_entrypoint_path "$1")"
   local _tmp
   _tmp="$(mktemp)"
-  # Wrap each un-guarded setup.bash source with `set +u` / `set -u`,
-  # preserving any preceding shellcheck-directive comment line directly above
-  # the source (do not split the directive from its target).
-  awk '
-    /\/opt\/ros\/.*setup\.bash/ && prev !~ /^[[:space:]]*set[[:space:]]+\+u[[:space:]]*$/ {
-      # If the previous emitted line was a shellcheck directive for this
-      # source, the +u must go ABOVE the directive. Re-buffer it.
-      if (held != "") { print "set +u"; print held; held = ""; print; print "set -u"; prev=$0; next }
-      print "set +u"; print; print "set -u"; prev=$0; next
-    }
-    {
-      if (held != "") { print held; held = "" }
-      if ($0 ~ /^[[:space:]]*#[[:space:]]*shellcheck/) { held=$0; prev=$0; next }
-      print; prev=$0
-    }
-    END { if (held != "") print held }
-  ' "${_entry}" > "${_tmp}"
+  _dfm_nounset_scan apply "$1" > "${_tmp}"
   _dfm_install "${_entry}" "${_tmp}"
-  _log_info upgrade entrypoint_patched "display=  entrypoint patched: nounset-guard ROS setup.bash source (#567 m8 / #579)"
+  if _dfm_take_changed "${_entry}"; then
+    _log_info upgrade entrypoint_patched "display=  entrypoint patched: nounset-guard ROS setup.bash source (#567 m8 / #579)"
+  fi
 }
 
 # ── Migration (smoke-copy): flat .base/test/smoke/ -> per-stage dist tree ────
@@ -1687,7 +1847,10 @@ _dfm_smoke_rewrite() {
         b = spec[j]
         sub(/.*\//, "", b)
         # A basename at two paths cannot be resolved from the name alone.
-        seen[b] = (b in seen) ? "?" : spec[j]
+        # Two statements: in one assignment mawk and busybox create seen[b]
+        # before they evaluate `b in seen`, so every name read as a duplicate
+        # (base#2138).
+        if (b in seen) { seen[b] = "?" } else { seen[b] = spec[j] }
       }
     }
     {
@@ -1702,7 +1865,9 @@ _dfm_smoke_rewrite() {
     END { flush() }
   ' "${_file}" > "${_tmp}"
   _dfm_install "${_file}" "${_tmp}"
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: ${_retired}/ -> per-stage smoke COPYs under ${_new} (${_ref})"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: ${_retired}/ -> per-stage smoke COPYs under ${_new} (${_ref})"
+  fi
 
   # Anything still naming the retired tree is a spec the pulled subtree no
   # longer ships under that name, or ships twice. Say so: the build will
@@ -1785,7 +1950,9 @@ _migrate_flat_to_dist_apply() {
   local _file="$1"
   _dfm_sed "${_file}" -e 's#\.base/config#.base/dist/config#g' \
     -e 's#\.base/script#.base/dist/script#g'
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: flat .base/{config,script} -> .base/dist/ (#915)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: flat .base/{config,script} -> .base/dist/ (#915)"
+  fi
 }
 
 # ── Migration (runtime-moved-files): the two non-helpers leaving runtime/ ───
@@ -1819,7 +1986,9 @@ _migrate_runtime_moved_files_apply() {
   _dfm_sed "${_file}" -E \
     -e 's#\.base/(downstream/|dist/)?script/docker/runtime/entrypoint\.sh#.base/dist/dockerfile/entrypoint.sh#g' \
     -e 's#\.base/(downstream/|dist/)?script/docker/runtime/smoke\.sh#.base/dist/test/bats/smoke/smoke.sh#g'
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: runtime/{entrypoint,smoke}.sh moved out of the helper dir (#971)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: runtime/{entrypoint,smoke}.sh moved out of the helper dir (#971)"
+  fi
 }
 
 # ── Migration (runtime-dir-copy): per-file helper COPYs -> one dir COPY ──────
@@ -1911,7 +2080,9 @@ _migrate_runtime_dir_copy_apply() {
     }
   ' "${_file}" > "${_tmp}"
   _dfm_install "${_file}" "${_tmp}"
-  _log_info upgrade dockerfile_patched "display=  Dockerfile patched: runtime helper COPYs collapsed into one directory COPY (#971)"
+  if _dfm_take_changed "${_file}"; then
+    _log_info upgrade dockerfile_patched "display=  Dockerfile patched: runtime helper COPYs collapsed into one directory COPY (#971)"
+  fi
 
   # Anything still naming a helper file is a shape the rewrite declined --
   # a backslash-continued statement. It still builds; say so rather than

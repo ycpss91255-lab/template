@@ -563,8 +563,11 @@ running it on a repo with a live field deployment. The numbered cycle:
    call `setup.sh apply` to regenerate `.env.generated` + `compose.yaml`
 4. `sed` rewrites every
    `ycpss91255-lab/base/.github/workflows/<file>@vX.Y.Z` ref in
-   `.github/workflows/main.yaml`, committed with step 3's changes as
-   `chore: update template references to <version>`
+   `.github/workflows/main.yaml` that directly follows a `uses:` on the same
+   line (inside a comment too), committed with step 3's changes as
+   `chore: update template references to <version>`. A base ref written any
+   other way is left as it is; outside a comment it is reported at the end
+   when it is still under the old org or at another release
 5. `apply_migrations` (`lib/dockerfile_migrate.sh`) heals the **repo-root
    `Dockerfile`** and **`script/entrypoint.sh`** where a base contract
    changed under them, and stages the result into the same commit as steps

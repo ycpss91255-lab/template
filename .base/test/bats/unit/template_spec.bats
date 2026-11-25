@@ -1678,6 +1678,131 @@ EOF
   rm -rf "${_tmp}"
 }
 
+# why: An owner whose name merely ENDS in the slug is a stranger, and the
+# rewrite of a retired ref replaces part of that name, so without a left
+# boundary it turns the stranger's owner into one that does not exist
+# (base#2118)
+@test "upgrade.sh main.yaml rewrite leaves an owner that only ends in the slug alone (base#2118)" {
+  local _tmp _yaml _retired _before
+  _tmp="$(mktemp -d)"
+  _yaml="${_tmp}/main.yaml"
+  _retired="ycpss91255-""docker/base"
+  cat > "${_yaml}" <<EOF
+jobs:
+  a:
+    uses: x${_retired}/.github/workflows/build-worker.yaml@v9.9.9
+  b:
+    uses: "my-${_retired}/.github/workflows/build-worker.yaml@v9.9.9"
+  c:
+    uses: xycpss91255-lab/base/.github/workflows/build-worker.yaml@v9.9.9
+  d:
+    uses: my.ycpss91255-lab/base/.github/workflows/build-worker.yaml@v9.9.9
+EOF
+  _before="$(cat "${_yaml}")"
+  _apply_main_yaml_rewrite "${_yaml}" v0.43.0-rc7
+
+  run cat "${_yaml}"
+  assert_output "${_before}"
+
+  rm -rf "${_tmp}"
+}
+
+# why: Only the value of a `uses:` is a ref an upgrade owns: a note that
+# records which ref a repo came from is the repo's own history, and rewriting
+# it makes the note false. A ref that is quoted, inline or commented out is
+# still a `uses:` and still moves (base#2118)
+@test "upgrade.sh main.yaml rewrite acts on inline uses: values only (base#2118)" {
+  local _tmp _yaml _retired _want
+  _tmp="$(mktemp -d)"
+  _yaml="${_tmp}/main.yaml"
+  _retired="ycpss91255-""docker/base"
+  cat > "${_yaml}" <<EOF
+# old: ${_retired}/.github/workflows/build-worker.yaml@v0.1.0
+# was: ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.1.0
+# this job reuses: ${_retired}/.github/workflows/build-worker.yaml@v0.1.0
+jobs:
+  a:
+    uses: "${_retired}/.github/workflows/build-worker.yaml@v0.41.0"
+  b:
+    uses: 'ycpss91255-lab/base/.github/workflows/release-worker.yaml@v0.41.0'
+  c: {uses: ${_retired}/.github/workflows/publish-worker.yaml@v0.41.0}
+  # d:
+  #   uses: ${_retired}/.github/workflows/publish-worker.yaml@v0.41.0
+  e:
+    "uses": ${_retired}/.github/workflows/build-worker.yaml@v0.41.0
+  f:
+    uses : ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.41.0
+EOF
+  _want="# old: ${_retired}/.github/workflows/build-worker.yaml@v0.1.0
+# was: ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.1.0
+# this job reuses: ${_retired}/.github/workflows/build-worker.yaml@v0.1.0
+jobs:
+  a:
+    uses: \"ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.43.0-rc7\"
+  b:
+    uses: 'ycpss91255-lab/base/.github/workflows/release-worker.yaml@v0.43.0-rc7'
+  c: {uses: ycpss91255-lab/base/.github/workflows/publish-worker.yaml@v0.43.0-rc7}
+  # d:
+  #   uses: ycpss91255-lab/base/.github/workflows/publish-worker.yaml@v0.43.0-rc7
+  e:
+    \"uses\": ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.43.0-rc7
+  f:
+    uses : ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.43.0-rc7"
+  _apply_main_yaml_rewrite "${_yaml}" v0.43.0-rc7
+
+  run cat "${_yaml}"
+  assert_output "${_want}"
+
+  rm -rf "${_tmp}"
+}
+
+# why: Each of these is a ref the rewrite used to reach, under both the
+# retired and the current slug; losing one leaves a consumer's job pinned to
+# an org that no longer resolves, or to the old release (base#2118)
+@test "upgrade.sh main.yaml rewrite reaches each inline spelling under both slugs (base#2118)" {
+  local _tmp _yaml _slug _tab=$'\t'
+  local _new='ycpss91255-lab/base/.github/workflows'
+  _tmp="$(mktemp -d)"
+  _yaml="${_tmp}/main.yaml"
+  for _slug in "ycpss91255-""docker/base" 'ycpss91255-lab/base'; do
+    cat > "${_yaml}" <<EOF
+    uses : ${_slug}/.github/workflows/build-worker.yaml@v0.41.0
+    uses:${_tab}${_slug}/.github/workflows/build-worker.yaml@v0.41.0
+    uses: ${_slug}/.github/workflows/build-worker.yml@v0.41.0
+  a: {uses: ${_slug}/.github/workflows/build-worker.yaml@v0.41.0}, b: {uses: ${_slug}/.github/workflows/release-worker.yaml@v0.41.0}
+EOF
+    _apply_main_yaml_rewrite "${_yaml}" v0.43.0-rc7
+    run cat "${_yaml}"
+    assert_output "    uses : ${_new}/build-worker.yaml@v0.43.0-rc7
+    uses:${_tab}${_new}/build-worker.yaml@v0.43.0-rc7
+    uses: ${_new}/build-worker.yml@v0.43.0-rc7
+  a: {uses: ${_new}/build-worker.yaml@v0.43.0-rc7}, b: {uses: ${_new}/release-worker.yaml@v0.43.0-rc7}"
+  done
+
+  rm -rf "${_tmp}"
+}
+
+# why: The line that bumps the ref needs the left boundary as much as the one
+# that moves the org: a key merely ending in `uses` is not a `uses`, whichever
+# slug it carries (base#2118)
+@test "upgrade.sh main.yaml rewrite leaves a key that only ends in uses alone (base#2118)" {
+  local _tmp _yaml _retired _before
+  _tmp="$(mktemp -d)"
+  _yaml="${_tmp}/main.yaml"
+  _retired="ycpss91255-""docker/base"
+  cat > "${_yaml}" <<EOF
+# this job reuses: ${_retired}/.github/workflows/build-worker.yaml@v0.1.0
+# this job reuses: ycpss91255-lab/base/.github/workflows/build-worker.yaml@v0.1.0
+EOF
+  _before="$(cat "${_yaml}")"
+  _apply_main_yaml_rewrite "${_yaml}" v0.43.0-rc7
+
+  run cat "${_yaml}"
+  assert_output "${_before}"
+
+  rm -rf "${_tmp}"
+}
+
 # ════════════════════════════════════════════════════════════════════
 # build-worker.yaml: GHCR test-tools migration (D plan)
 # ════════════════════════════════════════════════════════════════════
