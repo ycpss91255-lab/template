@@ -1,0 +1,65 @@
+[[image.rules]]
+rule = "prefix:docker_"
+
+[[image.rules]]
+rule = "suffix:_ws"
+
+[[image.rules]]
+rule = "@basename"
+
+[build]
+target_arch = ""
+network = "auto"
+
+[[build.args]]
+key = "APT_MIRROR_UBUNTU"
+value = "tw.archive.ubuntu.com"
+
+[[build.args]]
+key = "APT_MIRROR_DEBIAN"
+value = "mirror.twds.com.tw"
+
+[[build.args]]
+key = "TZ"
+value = "Asia/Taipei"
+
+[deploy]
+gpu_mode = "auto"
+gpu_count = "all"
+gpu_capabilities = "gpu compute utility graphics"
+gpu_runtime = "auto"
+dri_groups = "auto"
+
+[lifecycle]
+restart = "unless-stopped"
+
+[gui]
+mode = "auto"
+
+[network]
+mode = "host"
+ipc = "host"
+pid = "private"
+network_name = ""
+ports = []
+
+[security]
+privileged = false
+cap_add = []
+cap_drop = []
+security_opt = []
+
+[resources]
+shm_size = ""
+
+[[volumes]]
+source = "${WS_PATH}"
+target = "/home/${USER_NAME}/work"
+
+[logging]
+driver = "json-file"
+max_size = "10m"
+max_file = 3
+compress = true
+local_path = ""
+

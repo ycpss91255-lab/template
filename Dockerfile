@@ -5,7 +5,7 @@
 # TEST_TOOLS_IMAGE build arg. Default `test-tools:local` works for the
 # local `./build.sh` flow (builds Dockerfile.test-tools into the host
 # Docker daemon). CI overrides this to
-# `ghcr.io/ycpss91255-docker/test-tools:vX.Y.Z` so buildx can pull the
+# `ghcr.io/ycpss91255-lab/test-tools:vX.Y.Z` so buildx can pull the
 # arch-correct pre-built image without the cross-step image-store
 # isolation that broke the old test-tools:local CI pattern.
 #
@@ -114,10 +114,10 @@ ARG GROUP="${USER_GROUP}"
 ARG ENTRYPOINT_FILE="script/entrypoint.sh"
 ARG CONFIG_DIR="/tmp/config"
 # Layered config/ override (template#254): two sequential COPYs into
-# /tmp/config/. The first brings .base/config/ defaults; the
+# /tmp/config/. The first brings .base/dist/config/ defaults; the
 # second overlays <repo>/config/ on top. File-level merge -- files in
 # <repo>/config/ replace same-path files in /tmp/config/; files only
-# in .base/config/ stay; files only in <repo>/config/ are added.
+# in .base/dist/config/ stay; files only in <repo>/config/ are added.
 # Mental model is the same as setup.conf section-replace, just at
 # file granularity. <repo>/config/ becomes opt-in (init.sh seeds an
 # empty .gitkeep for new repos, not the full tree); existing repos
@@ -145,10 +145,10 @@ COPY --chmod=0755 "./${ENTRYPOINT_FILE}" "/entrypoint.sh"
 # bind-mounted .base/) avoids two failure modes: build-time smoke
 # crashes when $USER is unset, and multi-repo workspaces where
 # WS_PATH is the workspace parent rather than the repo root.
-COPY --chmod=0755 .base/script/docker/runtime/logging.sh /usr/local/lib/base/logging.sh
-# Layer 1: .base/config/ defaults (subtree-managed, updates with
+COPY --chmod=0755 .base/dist/script/docker/runtime/ /usr/local/lib/base/
+# Layer 1: .base/dist/config/ defaults (subtree-managed, updates with
 # .base/upgrade.sh).
-COPY --chown="${USER}":"${GROUP}" --chmod=0755 .base/config "${CONFIG_DIR}"
+COPY --chown="${USER}":"${GROUP}" --chmod=0755 .base/dist/config "${CONFIG_DIR}"
 # Layer 2: <repo>/config/ overrides (per-repo, survives subtree
 # pull). Files here overlay matching paths from layer 1.
 COPY --chown="${USER}":"${GROUP}" --chmod=0755 "${CONFIG_SRC}" "${CONFIG_DIR}"
@@ -199,6 +199,7 @@ FROM ${TEST_TOOLS_IMAGE} AS test-tools-stage
 
 FROM devel AS devel-test
 
+# hadolint ignore=DL3066
 USER root
 
 # Lint tools (from pre-built test-tools image; see TEST_TOOLS_IMAGE at top)
@@ -220,8 +221,8 @@ COPY script/*.sh /lint/
 # definition lives once in i18n.sh.
 # #406: all libs (including _lib.sh, i18n.sh, _tui_conf.sh) now live
 # under lib/. Single COPY preserves the directory structure.
-COPY .base/script/docker/lib /lint/lib
-COPY .base/script/docker/wrapper /lint/wrapper
+COPY .base/dist/script/docker/lib /lint/lib
+COPY .base/dist/script/docker/wrapper /lint/wrapper
 RUN shellcheck -S warning /lint/wrapper/*.sh /lint/lib/*.sh
 WORKDIR /lint
 RUN hadolint Dockerfile
@@ -234,8 +235,10 @@ RUN ln -sf /opt/bats/bin/bats /usr/local/bin/bats
 ENV BATS_LIB_PATH="/usr/lib/bats"
 
 # Smoke test (shared from template + repo-specific)
-COPY .base/test/smoke/ /smoke_test/
-COPY test/smoke/ /smoke_test/
+COPY .base/dist/test/bats/smoke/shared/ /smoke_test/
+COPY .base/dist/test/bats/smoke/devel-test/ /smoke_test/
+COPY test/bats/smoke/shared/ /smoke_test/
+COPY test/bats/smoke/devel-test/ /smoke_test/
 
 ARG USER
 USER "${USER}"
@@ -245,7 +248,7 @@ RUN bats /smoke_test/
 ############################## builder + runtime split (optional) ##############################
 # Three concrete stages for repos that need a separate runtime image
 # (compiled binaries / generated artifacts to ship without dev deps).
-# Lessons lifted from ycpss91255-docker/ros1_bridge#60 PR -- empirically
+# Lessons lifted from ycpss91255-lab/ros1_bridge#60 PR -- empirically
 # saved ~1.1 GB/arch on that repo's runtime image.
 #
 # Three rules, all of which the previous commented-out hint was silent on:
@@ -359,7 +362,7 @@ RUN bats /smoke_test/
 # # into [logging] local_path tee must repeat the COPY here so
 # # `. /usr/local/lib/base/logging.sh` works in the
 # # runtime image too.
-# COPY --chmod=0755 .base/script/docker/runtime/logging.sh /usr/local/lib/base/logging.sh
+# COPY --chmod=0755 .base/dist/script/docker/runtime/ /usr/local/lib/base/
 # USER "${USER}"
 # # WORKDIR interpolates only build-time ARG / ENV (not shell $HOME);
 # # see #334 for why the explicit ENV is required.
@@ -410,7 +413,7 @@ RUN bats /smoke_test/
 # # via runtime/smoke.sh (catches missing .so installs that the old
 # # 'whoami && bash --version' default silently passed -- e.g.
 # # libboost_regex.so absent in ros1_bridge#123).
-# COPY .base/script/docker/runtime/smoke.sh /usr/local/lib/base/smoke.sh
+# COPY .base/dist/test/bats/smoke/smoke.sh /usr/local/lib/base/smoke.sh
 # ARG RUNTIME_SMOKE_CMD='whoami && bash --version && bash /usr/local/lib/base/smoke.sh'
 # # Inherit USER from runtime (non-root). install-check doesn't need
 # # privilege; if downstream override needs root, prefix with sudo.

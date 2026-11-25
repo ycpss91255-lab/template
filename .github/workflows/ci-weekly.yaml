@@ -1,0 +1,23 @@
+name: CI (weekly)
+
+# A base release lands in a different repo, so nothing in ci.yaml fires for
+# it. Without a schedule, a base change that breaks bootstrap.sh waits for
+# the next push to this repo -- which may be months, and by then the breakage
+# is found by whoever tried to create a repo.
+#
+# Its own file because GitHub disables a workflow with a `schedule:` once the
+# repo has been quiet for 60 days. Here that costs the weekly run only; the
+# push and pull_request runs in ci.yaml keep going (#28).
+on:
+  # Off the hour on purpose: every workflow asking for "weekly" picks 0, and
+  # the runner queue shows it.
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yaml
