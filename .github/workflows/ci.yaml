@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # main merge queue 會以 merge_group 事件跑完整測試。
+  merge_group:
   workflow_dispatch:
   # ci-weekly.yaml calls this file on a schedule. The schedule is NOT here
   # on purpose: GitHub disables a workflow with a `schedule:` after 60 quiet
@@ -48,3 +50,22 @@ jobs:
         env:
           BOOTSTRAP_LIVE_BASE: "1"
         run: bats test/integration/bootstrap_live_spec.bats
+
+  # 單一聚合 check，供 main merge queue ruleset 作為 required check。
+  # 只有 needs 的所有 job 都 success 才通過；失敗、取消或被略過皆視為不通過。
+  ci-rollup:
+    name: ci-rollup
+    if: always()
+    needs: [test, live-base]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every needed job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in ${RESULTS}; do
+            if [ "${r}" != "success" ]; then
+              echo "needed job result: ${r}" >&2
+              exit 1
+            fi
+          done
