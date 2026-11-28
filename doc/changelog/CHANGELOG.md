@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `ci.yaml` 加上 `merge_group` 觸發與單一聚合 check `ci-rollup`，符合 org「main merge queue」ruleset 的前置條件。
+
 ### Fixed
 - The weekly CI schedule moves from `ci.yaml` to `ci-weekly.yaml`, which
   only calls `ci.yaml`. GitHub disables a workflow with a `schedule:` after

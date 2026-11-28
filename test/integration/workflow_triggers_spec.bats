@@ -89,3 +89,12 @@ _jobs() {
     fi
   done
 }
+
+@test "ci.yaml runs on merge_group and has a ci-rollup job for the merge queue" {
+  run _triggers "${WF}/ci.yaml"
+  assert_success
+  assert_line "merge_group"
+  run _jobs "${WF}/ci.yaml"
+  assert_success
+  assert_line "ci-rollup"
+}
